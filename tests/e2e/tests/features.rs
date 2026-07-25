@@ -131,3 +131,141 @@ fn fixture_builder_and_cli_runner_are_ready_for_scenario_steps() {
     world.assert_file("result.txt", b"expected");
     assert_eq!(world.session_id.as_deref(), Some("session-1"));
 }
+
+/// Executable coverage for all four M1 acceptance scenarios. The assertions use
+/// the same process boundary and isolated world as cucumber steps.
+#[test]
+fn m1_render_and_get_put_scenarios() {
+    let root = tempfile::tempdir().unwrap();
+    let template = root.path().join("python-lib");
+    fs::create_dir_all(template.join("{{ project_name }}")).unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        r#"
+[questions.project_name]
+type = "string"
+default = "sample"
+[questions.use_docker]
+type = "bool"
+default = false
+"#,
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ project_name }}\n定型の説明文",
+    )
+    .unwrap();
+    fs::write(
+        template.join("{{ project_name }}/main.py.j2"),
+        "print(\"{{ project_name }}\")",
+    )
+    .unwrap();
+    fs::write(
+        template.join("Dockerfile.j2"),
+        "{% if use_docker %}FROM python{% endif %}",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&template)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&template)
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args([
+            "-c",
+            "user.name=Relens",
+            "-c",
+            "user.email=relens@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ])
+        .current_dir(&template)
+        .status()
+        .unwrap();
+
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    for destination in [&first, &second] {
+        CliCommand::cargo_bin("relens")
+            .unwrap()
+            .args([
+                "new",
+                template.to_str().unwrap(),
+                "--destination",
+                destination.to_str().unwrap(),
+                "--answer",
+                "project_name=myapp",
+                "--answer",
+                "use_docker=false",
+            ])
+            .assert()
+            .success();
+    }
+    assert!(
+        fs::read_to_string(first.join("README.md"))
+            .unwrap()
+            .starts_with("# myapp")
+    );
+    assert!(first.join("myapp/main.py").is_file());
+    assert!(!first.join("Dockerfile").exists());
+    let answers = fs::read_to_string(first.join(".relens/answers.toml")).unwrap();
+    let revision = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&template)
+        .output()
+        .unwrap();
+    assert!(answers.contains(String::from_utf8(revision.stdout).unwrap().trim()));
+    assert_eq!(snapshot(&first), snapshot(&second));
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(first.join(".relens/lock.json")).unwrap()).unwrap();
+    for file in lock["files"].as_object().unwrap().values() {
+        let spans = file["source_map"]["spans"].as_array().unwrap();
+        assert!(!spans.is_empty());
+        assert_eq!(spans.first().unwrap()["start"], 0);
+        for pair in spans.windows(2) {
+            assert_eq!(pair[0]["end"], pair[1]["start"]);
+        }
+    }
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["lift", first.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("no-patch"));
+}
+
+fn snapshot(root: &Path) -> BTreeSet<(String, Vec<u8>)> {
+    walk(root)
+        .into_iter()
+        .map(|path| {
+            (
+                path.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                fs::read(path).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn walk(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(walk(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}

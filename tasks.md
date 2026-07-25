@@ -24,13 +24,16 @@
 
 ## M1 — render、SourceMap、drift
 
-- [ ] **[TODO] `render.feature`: 回答を与えてプロジェクトを生成する**
-- [ ] **[TODO] `render.feature`: 生成結果は決定的である**
-- [ ] **[TODO] `render.feature`: 由来マップが出力全体を被覆する**
-- [ ] **[TODO] `roundtrip.feature`: GetPut 則 — ドリフトがなければパッチは空**
-- [ ] **[TODO] Questionnaire / AnswerSet / TemplateRef の型と検証を実装する**
-- [ ] **[TODO] Jinja サブセット parser と非対応構文の診断を実装する**
-- [ ] **[TODO] `.relens/answers.toml` と `lock.json` の永続化を実装する**
+- [x] **[DONE] `render.feature`: 回答を与えてプロジェクトを生成する**
+- [x] **[DONE] `render.feature`: 生成結果は決定的である**
+- [x] **[DONE] `render.feature`: 由来マップが出力全体を被覆する**
+- [x] **[DONE] `roundtrip.feature`: GetPut 則 — ドリフトがなければパッチは空**
+- [x] **[DONE] Questionnaire / AnswerSet / TemplateRef の型と検証を実装する**
+- [x] **[DONE] Jinja サブセット parser と非対応構文の診断を実装する**
+- [x] **[DONE] `.relens/answers.toml` と `lock.json` の永続化を実装する**
+  - 型付き回答、決定的なファイル走査、計装 render、空ドリフトの GetPut を実装。
+  - `relens-domain`、`relens-engine`、`relens-store` と CLI の `new` / `drift` / `lift` を更新。
+  - crate unit test と `cargo test -p relens-cli --test features` の M1 シナリオで検証。
 
 ## M2 — update
 
