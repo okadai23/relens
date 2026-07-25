@@ -51,6 +51,7 @@ fn render_tree(
             .strip_suffix(".j2")
             .unwrap_or(&output_path)
             .replace('\\', "/");
+        let output_path = relens_store::portable_path(&safe_relative_path(&output_path)?);
         let output = relens_engine::render(source, answers)
             .with_context(|| format!("failed to render {path}"))?;
         if !output.bytes.is_empty() {
@@ -80,6 +81,11 @@ fn update(project: &Path) -> Result<CommandResult> {
         .chain(updated.keys())
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    // Check every target before changing any files so a malicious tree cannot
+    // leave the project partially updated before an unsafe path is discovered.
+    for path in &paths {
+        reject_symlinked_path(project, Path::new(path))?;
+    }
     let mut merged_metadata = BTreeMap::new();
     let mut conflicts = Vec::new();
     for path in paths {
@@ -127,6 +133,28 @@ fn update(project: &Path) -> Result<CommandResult> {
     relens_store::persist(project, &answers, &merged_metadata)
         .context("failed to persist updated metadata")?;
     Ok(CommandResult::new("updated", project.display().to_string()))
+}
+
+fn reject_symlinked_path(project: &Path, relative: &Path) -> Result<()> {
+    let mut candidate = project.to_path_buf();
+    for component in relative.components() {
+        candidate.push(component);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "refusing to update through symbolic link: {}",
+                    candidate.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", candidate.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn new_project(
@@ -272,8 +300,9 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_relative_path;
-    use std::path::PathBuf;
+    use super::{reject_symlinked_path, render_tree, safe_relative_path};
+    use relens_domain::{AnswerValue, TemplateTree};
+    use std::{collections::BTreeMap, path::PathBuf};
 
     #[test]
     fn accepts_only_paths_confined_to_the_destination() {
@@ -284,5 +313,45 @@ mod tests {
         for unsafe_path in ["", "/tmp/file", "../file", "src/../../file", "C:/file"] {
             assert!(safe_relative_path(unsafe_path).is_err(), "{unsafe_path}");
         }
+    }
+
+    fn answers(name: &str) -> BTreeMap<String, AnswerValue> {
+        BTreeMap::from([("name".to_string(), AnswerValue::String(name.into()))])
+    }
+
+    #[test]
+    fn render_tree_normalizes_paths_confined_to_the_project() {
+        let tree = TemplateTree::from([("src/./{{ name }}.py.j2".to_string(), b"pass".to_vec())]);
+        let rendered = render_tree(&tree, &answers("main")).unwrap();
+        assert_eq!(rendered.keys().collect::<Vec<_>>(), ["src/main.py"]);
+    }
+
+    #[test]
+    fn render_tree_rejects_paths_escaping_the_project() {
+        let tree = TemplateTree::from([("{{ name }}/file.txt.j2".to_string(), b"data".to_vec())]);
+        for escaping in ["../..", "/tmp"] {
+            assert!(
+                render_tree(&tree, &answers(escaping)).is_err(),
+                "{escaping}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_in_update_targets() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join("output")).unwrap();
+
+        assert!(
+            reject_symlinked_path(&project, PathBuf::from("output/file.txt").as_path()).is_err()
+        );
+        assert!(reject_symlinked_path(&project, PathBuf::from("safe/file.txt").as_path()).is_ok());
     }
 }
