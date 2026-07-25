@@ -329,6 +329,12 @@ fn m2_update_scenarios() {
             .unwrap()
             .contains("Template overview")
     );
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["drift", independent.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("myapp/main.py"));
 
     CliCommand::cargo_bin("relens")
         .unwrap()
