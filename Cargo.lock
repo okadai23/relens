@@ -811,6 +811,8 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "cucumber",
+ "gherkin",
  "predicates",
  "relens-domain",
  "relens-engine",
@@ -829,16 +831,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "relens-e2e"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "cucumber",
- "gherkin",
- "tempfile",
 ]
 
 [[package]]
