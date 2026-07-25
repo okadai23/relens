@@ -40,7 +40,7 @@ fn new_project(
     for relative in relens_store::template_files(template)? {
         let source = fs::read_to_string(template.join(&relative))
             .with_context(|| format!("template {} is not UTF-8", relative.display()))?;
-        let path_template = relative.to_string_lossy();
+        let path_template = relens_store::portable_path(&relative);
         let output_path =
             relens_engine::render(&path_template, &answers).context("failed to render path")?;
         let output_path =
@@ -48,7 +48,7 @@ fn new_project(
         let output_path = output_path
             .strip_suffix(".j2")
             .unwrap_or(&output_path)
-            .to_owned();
+            .replace('\\', "/");
         let output = relens_engine::render(&source, &answers)
             .with_context(|| format!("failed to render {}", relative.display()))?;
         if output.bytes.is_empty() {

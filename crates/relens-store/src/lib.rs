@@ -86,6 +86,12 @@ pub fn template_files(root: &Path) -> Result<Vec<PathBuf>, RelensError> {
     Ok(files)
 }
 
+/// Converts a project-relative path to the platform-independent form used in
+/// templates and lock files.
+pub fn portable_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LockFile {
     pub files: BTreeMap<String, LockedFile>,
@@ -123,6 +129,11 @@ pub fn drift(project: &Path) -> Result<Vec<String>, RelensError> {
     let path = project.join(".relens/lock.json");
     let lock: LockFile =
         serde_json::from_slice(&fs::read(&path).io(&path)?).map_err(|e| validation("lock", e))?;
+    let locked_paths = lock
+        .files
+        .keys()
+        .map(|relative| portable_path(Path::new(relative)))
+        .collect::<std::collections::BTreeSet<_>>();
     let mut changed = Vec::new();
     for (relative, file) in &lock.files {
         match fs::read(project.join(relative)) {
@@ -136,13 +147,13 @@ pub fn drift(project: &Path) -> Result<Vec<String>, RelensError> {
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
     {
-        let relative = entry
-            .path()
-            .strip_prefix(project)
-            .expect("walked below project")
-            .to_string_lossy()
-            .replace('\\', "/");
-        if !lock.files.contains_key(&relative) && !changed.contains(&relative) {
+        let relative = portable_path(
+            entry
+                .path()
+                .strip_prefix(project)
+                .expect("walked below project"),
+        );
+        if !locked_paths.contains(&relative) && !changed.contains(&relative) {
             changed.push(relative);
         }
     }
@@ -204,5 +215,17 @@ mod tests {
         assert!(drift(d.path()).unwrap().is_empty());
         fs::write(d.path().join("a"), "new").unwrap();
         assert_eq!(drift(d.path()).unwrap(), ["a"]);
+    }
+
+    #[test]
+    fn portable_paths_are_stable_across_platforms() {
+        assert_eq!(
+            portable_path(Path::new(r"package\main.py")),
+            "package/main.py"
+        );
+        assert_eq!(
+            portable_path(Path::new("package/main.py")),
+            "package/main.py"
+        );
     }
 }

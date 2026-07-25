@@ -34,6 +34,7 @@
   - 型付き回答、決定的なファイル走査、計装 render、空ドリフトの GetPut を実装。
   - `relens-domain`、`relens-engine`、`relens-store` と CLI の `new` / `drift` / `lift` を更新。
   - crate unit test と `cargo test -p relens-cli --test features` の M1 シナリオで検証。
+  - Windows でもテンプレートパスと lock のキーを `/` 区切りへ正規化し、生成直後の誤検出を防止。
 
 ## M2 — update
 
