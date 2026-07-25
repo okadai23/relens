@@ -1,7 +1,7 @@
 //! Deterministic filesystem persistence for project metadata.
 use relens_domain::{
-    AnswerSet, AnswerValue, CommandResult, Question, QuestionKind, Questionnaire, RelensError,
-    SourceMap,
+    AnswerSet, AnswerValue, CommandResult, LiftSession, Question, QuestionKind, Questionnaire,
+    RelensError, SourceMap,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -133,6 +133,34 @@ pub fn load_lock(project: &Path) -> Result<LockFile, RelensError> {
     let path = project.join(".relens/lock.json");
     serde_json::from_slice(&fs::read(&path).io(&path)?).map_err(|e| validation("lock", e))
 }
+
+pub fn save_session(project: &Path, session: &LiftSession) -> Result<(), RelensError> {
+    let directory = project.join(".relens/sessions");
+    fs::create_dir_all(&directory).io(&directory)?;
+    let path = directory.join(format!("{}.json", session.id));
+    let json = serde_json::to_vec_pretty(session).map_err(|e| validation("lift session", e))?;
+    fs::write(&path, json).io(&path)
+}
+
+pub fn load_session(project: &Path, id: Option<&str>) -> Result<LiftSession, RelensError> {
+    let directory = project.join(".relens/sessions");
+    let path = if let Some(id) = id {
+        directory.join(format!("{id}.json"))
+    } else {
+        let mut paths = fs::read_dir(&directory)
+            .io(&directory)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.pop().ok_or_else(|| RelensError::Validation {
+            kind: "lift session",
+            message: "no resumable session exists".into(),
+        })?
+    };
+    serde_json::from_slice(&fs::read(&path).io(&path)?).map_err(|e| validation("lift session", e))
+}
 pub fn drift(project: &Path) -> Result<Vec<String>, RelensError> {
     let lock = load_lock(project)?;
     let locked_paths = lock
@@ -233,5 +261,21 @@ mod tests {
             portable_path(Path::new("package/main.py")),
             "package/main.py"
         );
+    }
+
+    #[test]
+    fn lift_session_round_trips() {
+        use relens_domain::{LiftSession, LiftSessionState};
+        let d = tempfile::tempdir().unwrap();
+        let session = LiftSession {
+            id: "0001".into(),
+            project: "app".into(),
+            template: TemplateRef::new("repo", "abc").unwrap(),
+            state: LiftSessionState::Verified,
+            edits: vec![],
+            divergences: vec![],
+        };
+        save_session(d.path(), &session).unwrap();
+        assert_eq!(load_session(d.path(), None).unwrap(), session);
     }
 }

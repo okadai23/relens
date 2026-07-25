@@ -74,6 +74,112 @@ pub struct AnswerSet {
     pub answers: BTreeMap<String, AnswerValue>,
 }
 
+/// Durable state machine for a reviewed lift operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiftSession {
+    pub id: String,
+    pub project: String,
+    pub template: TemplateRef,
+    pub state: LiftSessionState,
+    pub edits: Vec<SessionEdit>,
+    #[serde(default)]
+    pub divergences: Vec<SessionDivergence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LiftSessionState {
+    Reviewing,
+    Verified,
+    Exported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEdit {
+    pub project_path: String,
+    pub template_path: Option<String>,
+    pub literal: String,
+    pub substituted: Option<String>,
+    pub decision: ReviewDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReviewDecision {
+    Automatic,
+    Pending,
+    KeepLiteral,
+    Substitute,
+    Unmappable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDivergence {
+    pub path: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+impl LiftSession {
+    pub fn resolve(&mut self, index: usize, decision: ReviewDecision) -> Result<(), RelensError> {
+        if self.state != LiftSessionState::Reviewing
+            || !matches!(
+                decision,
+                ReviewDecision::KeepLiteral | ReviewDecision::Substitute
+            )
+        {
+            return Err(session_transition(
+                "only a reviewing session can resolve a candidate",
+            ));
+        }
+        let edit = self
+            .edits
+            .get_mut(index)
+            .ok_or_else(|| RelensError::Validation {
+                kind: "lift session",
+                message: format!("unknown edit {index}"),
+            })?;
+        if edit.decision != ReviewDecision::Pending {
+            return Err(session_transition("only a pending edit can be resolved"));
+        }
+        edit.decision = decision;
+        Ok(())
+    }
+
+    pub fn verify(&mut self, divergences: Vec<SessionDivergence>) -> Result<(), RelensError> {
+        if self.state != LiftSessionState::Reviewing
+            || self
+                .edits
+                .iter()
+                .any(|edit| edit.decision == ReviewDecision::Pending)
+        {
+            return Err(session_transition(
+                "all review decisions are required before verification",
+            ));
+        }
+        self.divergences = divergences;
+        if self.divergences.is_empty() {
+            self.state = LiftSessionState::Verified;
+        }
+        Ok(())
+    }
+
+    pub fn export(&mut self) -> Result<(), RelensError> {
+        if self.state != LiftSessionState::Verified || !self.divergences.is_empty() {
+            return Err(session_transition(
+                "a session must be verified before export",
+            ));
+        }
+        self.state = LiftSessionState::Exported;
+        Ok(())
+    }
+}
+
+fn session_transition(message: &str) -> RelensError {
+    RelensError::Validation {
+        kind: "lift session",
+        message: message.into(),
+    }
+}
+
 /// A deterministic snapshot of the files in a template revision.
 pub type TemplateTree = BTreeMap<String, Vec<u8>>;
 
@@ -248,5 +354,29 @@ mod tests {
         };
         assert!(good.validate_coverage(2).is_ok());
         assert!(good.validate_coverage(3).is_err());
+    }
+
+    #[test]
+    fn lift_session_requires_review_and_verification_before_export() {
+        let mut session = LiftSession {
+            id: "one".into(),
+            project: "app".into(),
+            template: TemplateRef::new("repo", "abc").unwrap(),
+            state: LiftSessionState::Reviewing,
+            edits: vec![SessionEdit {
+                project_path: "a".into(),
+                template_path: Some("a.j2".into()),
+                literal: "main".into(),
+                substituted: Some("{{ name }}".into()),
+                decision: ReviewDecision::Pending,
+            }],
+            divergences: vec![],
+        };
+        assert!(session.export().is_err());
+        session.resolve(0, ReviewDecision::KeepLiteral).unwrap();
+        session.verify(vec![]).unwrap();
+        assert_eq!(session.state, LiftSessionState::Verified);
+        session.export().unwrap();
+        assert_eq!(session.state, LiftSessionState::Exported);
     }
 }

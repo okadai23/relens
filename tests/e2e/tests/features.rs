@@ -90,6 +90,11 @@ fn exit_is_success(world: &mut RelensWorld) {
     assert_eq!(world.last_cli.as_ref().unwrap().status, 0);
 }
 
+#[then("終了コードは 0 以外である")]
+fn exit_is_failure(world: &mut RelensWorld) {
+    assert_ne!(world.last_cli.as_ref().unwrap().status, 0);
+}
+
 #[then(regex = r##"^ファイル "README.md" の内容は "# myapp" で始まる$"##)]
 fn readme_starts_correctly(world: &mut RelensWorld) {
     assert!(
@@ -353,6 +358,149 @@ fn addition_not_patched(world: &mut RelensWorld) {
     assert!(!patch(world).contains("notes/private.md"));
 }
 
+#[given(regex = r#"^回答 \"project_name=main\" で生成されたプロジェクトがある$"#)]
+fn generated_main_project(world: &mut RelensWorld) {
+    generate(
+        world,
+        "main-project",
+        &["project_name=main", "use_docker=false"],
+    );
+}
+
+#[given(regex = r#"^ユーザーが新しい行 \"run main here\" をファイルに追加した$"#)]
+fn append_accidental_match(world: &mut RelensWorld) {
+    let path = world.project_directory.as_ref().unwrap().join("README.md");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("\nrun main here");
+    fs::write(path, text).unwrap();
+}
+
+#[then(regex = r#"^当該 hunk は \"Ambiguous\" に分類される$"#)]
+fn hunk_is_ambiguous(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout).contains("Ambiguous")
+    );
+}
+
+#[then(
+    regex = r#"^候補として \"run \{\{ project_name \}\} here\" と \"run main here\" の両方が提示される$"#
+)]
+fn both_candidates_present(world: &mut RelensWorld) {
+    let output = String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout);
+    assert!(output.contains("run {{ project_name }} here") && output.contains("run main here"));
+}
+
+#[given(regex = r#"^\"Ambiguous\" な hunk を含む LiftSession が存在する$"#)]
+fn ambiguous_session_exists(world: &mut RelensWorld) {
+    generated_main_project(world);
+    append_accidental_match(world);
+    run_lift(world);
+}
+
+#[when("ユーザーが当該 hunk に \"リテラルのまま維持\" を裁定する")]
+fn choose_keep_literal(_: &mut RelensWorld) {}
+
+#[when(regex = r#"^\"relens lift --resume\" を実行する$"#)]
+fn resume_lift(world: &mut RelensWorld) {
+    let project = world.project_directory.clone().unwrap();
+    world.run_cli(&["lift", project.to_str().unwrap(), "--resume"]);
+}
+
+#[then(regex = r#"^セッションの状態は \"Verified\" に遷移する$"#)]
+fn session_verified(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout)
+            .contains("state:Verified")
+    );
+}
+
+#[then("TemplatePatch には裁定どおりの平文が含まれる")]
+fn patch_keeps_literal(world: &mut RelensWorld) {
+    assert!(patch(world).contains("run main here"));
+}
+
+#[given("検証済み(Verified)の LiftSession が存在する")]
+fn verified_session_exists(world: &mut RelensWorld) {
+    fix_literal_typo(world);
+    run_lift(world);
+}
+
+#[when(regex = r#"^\"relens lift --export\" を実行する$"#)]
+fn export_lift(world: &mut RelensWorld) {
+    let project = world.project_directory.clone().unwrap();
+    world.run_cli(&["lift", project.to_str().unwrap(), "--export"]);
+}
+
+#[then(regex = r#"^テンプレートリポジトリにブランチ \"lift/myapp-<セッションID>\" が作成される$"#)]
+fn export_branch_exists(world: &mut RelensWorld) {
+    let branches = git_output(
+        world.template_repository.as_ref().unwrap(),
+        &["branch", "--list", "lift/myapp-*"],
+    );
+    assert!(branches.contains("lift/myapp-"));
+}
+
+#[then("ブランチのコミットに TemplatePatch が適用されている")]
+fn exported_patch_applied(world: &mut RelensWorld) {
+    assert!(
+        fs::read_to_string(
+            world
+                .template_repository
+                .as_ref()
+                .unwrap()
+                .join("README.md.j2")
+        )
+        .unwrap()
+        .contains("定型の説明文を修正")
+    );
+}
+
+#[then("コミットメッセージに由来プロジェクトと元コミットが記録されている")]
+fn export_commit_metadata(world: &mut RelensWorld) {
+    let message = git_output(
+        world.template_repository.as_ref().unwrap(),
+        &["log", "-1", "--pretty=%B"],
+    );
+    assert!(message.contains("myapp") && message.contains("Source-Commit:"));
+}
+
+#[given("持ち上げ後の再レンダリングが修正後プロジェクトと一致しない状態を注入する")]
+fn inject_failed_verification(world: &mut RelensWorld) {
+    verified_session_exists(world);
+    let sessions = world
+        .project_directory
+        .as_ref()
+        .unwrap()
+        .join(".relens/sessions");
+    let path = fs::read_dir(sessions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    json["state"] = "Reviewing".into();
+    json["divergences"] = serde_json::json!([{"path":"README.md","start":0,"end":8}]);
+    fs::write(path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+}
+
+#[then("標準出力に不一致箇所(ファイルと範囲)が表示される")]
+fn divergence_is_printed(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout)
+            .contains("README.md:0..8")
+    );
+}
+
+#[then("テンプレートリポジトリに新しいブランチは作成されていない")]
+fn no_export_branch(world: &mut RelensWorld) {
+    let branches = git_output(
+        world.template_repository.as_ref().unwrap(),
+        &["branch", "--list", "lift/*"],
+    );
+    assert!(branches.trim().is_empty());
+}
+
 #[when(regex = r#"^"relens lift" を実行する$"#)]
 fn run_lift(world: &mut RelensWorld) {
     let project = world.project_directory.clone().unwrap();
@@ -427,6 +575,23 @@ fn executes_completed_m3_lift_features_with_cucumber_steps() {
         RelensWorld::cucumber()
             .filter_run_and_exit(features.join("roundtrip.feature"), |_, _, scenario| {
                 scenario.name.contains("PutGet")
+            })
+            .await;
+    });
+}
+
+#[test]
+fn executes_completed_m4_lift_features_with_cucumber_steps() {
+    let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features");
+    futures::executor::block_on(async {
+        RelensWorld::cucumber()
+            .filter_run_and_exit(features.join("lift.feature"), |_, _, scenario| {
+                scenario.name.contains("偶然一致")
+                    || scenario.name.contains("リテラル維持")
+                    || scenario.name.contains("検証に失敗")
+                    || scenario
+                        .name
+                        .contains("テンプレートリポジトリへエクスポート")
             })
             .await;
     });
