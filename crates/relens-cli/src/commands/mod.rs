@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use relens_domain::{
     AnswerSet, AnswerValue, CommandResult, TemplateRef, TemplateSource, TemplateTree,
 };
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, io, path::Path};
 
 use crate::cli::Command;
 
@@ -87,7 +87,15 @@ fn update(project: &Path) -> Result<CommandResult> {
             .get(&path)
             .map(|value| value.0.as_slice())
             .unwrap_or_default();
-        let local = fs::read(project.join(&path)).unwrap_or_default();
+        let project_path = project.join(&path);
+        let local = match fs::read(&project_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", project_path.display()));
+            }
+        };
         let result = relens_engine::three_way_merge(old, &local, new);
         let (bytes, conflict) = match result {
             relens_engine::MergeResult::Merged(bytes) => (bytes, false),
@@ -104,8 +112,8 @@ fn update(project: &Path) -> Result<CommandResult> {
         if conflict {
             conflicts.push(path.clone());
         }
-        if let Some((_, map)) = updated.get(&path) {
-            merged_metadata.insert(path, (bytes, map.clone()));
+        if let Some((rendered, map)) = updated.get(&path) {
+            merged_metadata.insert(path, (rendered.clone(), map.clone()));
         }
     }
     if !conflicts.is_empty() {
