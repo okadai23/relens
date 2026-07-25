@@ -882,6 +882,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "cucumber",
+ "futures",
  "gherkin",
  "predicates",
  "relens-domain",

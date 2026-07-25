@@ -6,7 +6,7 @@ use std::{
 };
 
 use assert_cmd::Command as CliCommand;
-use cucumber::World;
+use cucumber::{World, given, then, when};
 use tempfile::TempDir;
 
 /// Scenario-isolated state for executable feature steps.
@@ -17,6 +17,7 @@ pub struct RelensWorld {
     project_directory: Option<PathBuf>,
     last_cli: Option<CliOutput>,
     session_id: Option<String>,
+    second_project: Option<PathBuf>,
 }
 
 impl Default for RelensWorld {
@@ -27,8 +28,212 @@ impl Default for RelensWorld {
             project_directory: None,
             last_cli: None,
             session_id: None,
+            second_project: None,
         }
     }
+}
+
+#[given(regex = r#"^テンプレートリポジトリ "python-lib" が存在する:$"#)]
+fn template_repository_exists(world: &mut RelensWorld) {
+    let template = world.git_fixture("python-lib").to_path_buf();
+    fs::create_dir_all(template.join("{{ project_name }}")).unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.project_name]\ntype = \"string\"\ndefault = \"sample\"\n[questions.use_docker]\ntype = \"bool\"\ndefault = false\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ project_name }}\n定型の説明文",
+    )
+    .unwrap();
+    fs::write(
+        template.join("{{ project_name }}/main.py.j2"),
+        "print(\"{{ project_name }}\")",
+    )
+    .unwrap();
+    fs::write(
+        template.join("Dockerfile.j2"),
+        "{% if use_docker %}FROM python{% endif %}",
+    )
+    .unwrap();
+    git_commit(&template, "fixture");
+}
+
+#[when(
+    regex = r#"^"relens new python-lib" を回答 "project_name=myapp, use_docker=false" で実行する$"#
+)]
+fn generate_with_answers(world: &mut RelensWorld) {
+    generate(
+        world,
+        "project",
+        &["project_name=myapp", "use_docker=false"],
+    );
+}
+
+#[when("同一のテンプレートと回答で 2 回生成する")]
+fn generate_twice(world: &mut RelensWorld) {
+    generate(world, "first", &["project_name=myapp", "use_docker=false"]);
+    let first = world.project_directory.clone();
+    generate(world, "second", &["project_name=myapp", "use_docker=false"]);
+    world.second_project = world.project_directory.clone();
+    world.project_directory = first;
+}
+
+#[when(regex = r#"^"relens new python-lib" を既定の回答で実行する$"#)]
+fn generate_with_defaults(world: &mut RelensWorld) {
+    generate(world, "default", &[]);
+}
+
+#[then("終了コードは 0 である")]
+fn exit_is_success(world: &mut RelensWorld) {
+    assert_eq!(world.last_cli.as_ref().unwrap().status, 0);
+}
+
+#[then(regex = r##"^ファイル "README.md" の内容は "# myapp" で始まる$"##)]
+fn readme_starts_correctly(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(
+            &fs::read(world.project_directory.as_ref().unwrap().join("README.md")).unwrap()
+        )
+        .starts_with("# myapp")
+    );
+}
+
+#[then(regex = r#"^ディレクトリ "myapp" にファイル "main.py" が存在する$"#)]
+fn nested_file_exists(world: &mut RelensWorld) {
+    assert!(
+        world
+            .project_directory
+            .as_ref()
+            .unwrap()
+            .join("myapp/main.py")
+            .is_file()
+    );
+}
+
+#[then(regex = r#"^ファイル "Dockerfile" は存在しない$"#)]
+fn dockerfile_absent(world: &mut RelensWorld) {
+    assert!(
+        !world
+            .project_directory
+            .as_ref()
+            .unwrap()
+            .join("Dockerfile")
+            .exists()
+    );
+}
+
+#[then(regex = r#"^"\.relens/answers\.toml" にテンプレートのコミットIDが記録されている$"#)]
+fn revision_recorded(world: &mut RelensWorld) {
+    let revision = git_output(
+        world.template_repository.as_ref().unwrap(),
+        &["rev-parse", "HEAD"],
+    );
+    let answers = fs::read_to_string(
+        world
+            .project_directory
+            .as_ref()
+            .unwrap()
+            .join(".relens/answers.toml"),
+    )
+    .unwrap();
+    assert!(answers.contains(revision.trim()));
+}
+
+#[then("2 つの生成結果のファイル木はバイト単位で一致する")]
+fn trees_match(world: &mut RelensWorld) {
+    assert_eq!(
+        snapshot(world.project_directory.as_ref().unwrap()),
+        snapshot(world.second_project.as_ref().unwrap())
+    );
+}
+
+#[then("生成された各テキストファイルの SourceMap は隙間なく全バイトを被覆している")]
+fn source_maps_cover_output(world: &mut RelensWorld) {
+    let lock: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            world
+                .project_directory
+                .as_ref()
+                .unwrap()
+                .join(".relens/lock.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for file in lock["files"].as_object().unwrap().values() {
+        let spans = file["source_map"]["spans"].as_array().unwrap();
+        assert_eq!(spans.first().unwrap()["start"], 0);
+        for pair in spans.windows(2) {
+            assert_eq!(pair[0]["end"], pair[1]["start"]);
+        }
+    }
+}
+
+#[given("生成直後で未修正のプロジェクトがある")]
+fn pristine_project(world: &mut RelensWorld) {
+    template_repository_exists(world);
+    generate_with_defaults(world);
+}
+
+#[when(regex = r#"^"relens lift" を実行する$"#)]
+fn run_lift(world: &mut RelensWorld) {
+    let project = world.project_directory.clone().unwrap();
+    world.run_cli(&["lift", project.to_str().unwrap()]);
+}
+
+#[then("Drift は空である")]
+fn drift_empty(world: &mut RelensWorld) {
+    assert_eq!(world.last_cli.as_ref().unwrap().status, 0);
+}
+
+#[then("TemplatePatch は生成されない")]
+fn no_patch(world: &mut RelensWorld) {
+    assert!(String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout).contains("no-patch"));
+}
+
+fn generate(world: &mut RelensWorld, name: &str, answers: &[&str]) {
+    let destination = world.root.as_ref().unwrap().path().join(name);
+    let template = world.template_repository.clone().unwrap();
+    let mut args = vec![
+        "new",
+        template.to_str().unwrap(),
+        "--destination",
+        destination.to_str().unwrap(),
+    ];
+    for answer in answers {
+        args.extend(["--answer", answer]);
+    }
+    world.run_cli(&args);
+    world.project_directory = Some(destination);
+}
+
+fn git_output(path: &Path, args: &[&str]) -> String {
+    String::from_utf8(
+        Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+}
+
+#[test]
+fn executes_completed_m1_features_with_cucumber_steps() {
+    let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features");
+    futures::executor::block_on(async {
+        RelensWorld::cucumber()
+            .run_and_exit(features.join("render.feature"))
+            .await;
+        RelensWorld::cucumber()
+            .filter_run_and_exit(features.join("roundtrip.feature"), |_, _, scenario| {
+                scenario.name.contains("GetPut")
+            })
+            .await;
+    });
 }
 
 #[derive(Debug)]
@@ -357,11 +562,14 @@ fn git_commit(repository: &Path, message: &str) {
             .status()
             .unwrap();
     }
-    Command::new("git")
-        .args(["add", "."])
-        .current_dir(repository)
-        .status()
-        .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(repository)
+            .status()
+            .unwrap()
+            .success()
+    );
     let status = Command::new("git")
         .args([
             "-c",

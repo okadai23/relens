@@ -2,7 +2,11 @@ use anyhow::{Context, Result, bail};
 use relens_domain::{
     AnswerSet, AnswerValue, CommandResult, TemplateRef, TemplateSource, TemplateTree,
 };
-use std::{collections::BTreeMap, fs, io, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    path::{Component, Path, PathBuf},
+};
 
 use crate::cli::Command;
 
@@ -136,7 +140,8 @@ fn new_project(
     let answers = questionnaire
         .validate(&supplied)
         .context("invalid answers")?;
-    let revision = git_revision(template).unwrap_or_else(|| "working-tree".into());
+    ensure_clean_template(template)?;
+    let revision = git_revision(template).context("template repository has no HEAD commit")?;
     let reference = TemplateRef::new(template.display().to_string(), revision)
         .context("invalid template reference")?;
     fs::create_dir_all(destination)
@@ -154,6 +159,7 @@ fn new_project(
             .strip_suffix(".j2")
             .unwrap_or(&output_path)
             .replace('\\', "/");
+        let output_path = safe_relative_path(&output_path)?;
         let output = relens_engine::render(&source, &answers)
             .with_context(|| format!("failed to render {}", relative.display()))?;
         if output.bytes.is_empty() {
@@ -164,7 +170,10 @@ fn new_project(
             fs::create_dir_all(parent)?;
         }
         fs::write(&target, &output.bytes)?;
-        rendered.insert(output_path, (output.bytes, output.source_map));
+        rendered.insert(
+            relens_store::portable_path(&output_path),
+            (output.bytes, output.source_map),
+        );
     }
     relens_store::persist(
         destination,
@@ -206,6 +215,47 @@ fn git_revision(template: &Path) -> Option<String> {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().into())
 }
+
+fn ensure_clean_template(template: &Path) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(template)
+        .output()
+        .context("failed to inspect template repository")?;
+    if !output.status.success() {
+        bail!("template must be a Git repository with a committed HEAD");
+    }
+    if !output.stdout.is_empty() {
+        bail!("template repository has uncommitted or untracked files");
+    }
+    Ok(())
+}
+
+fn safe_relative_path(rendered: &str) -> Result<PathBuf> {
+    let path = Path::new(rendered);
+    let windows_drive = rendered
+        .as_bytes()
+        .get(1)
+        .is_some_and(|separator| *separator == b':');
+    if rendered.is_empty() || path.is_absolute() || windows_drive {
+        bail!("rendered path must be a non-empty relative path: `{rendered}`");
+    }
+    let mut safe = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => safe.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("rendered path escapes the destination: `{rendered}`");
+            }
+        }
+    }
+    if safe.as_os_str().is_empty() {
+        bail!("rendered path must name a file: `{rendered}`");
+    }
+    Ok(safe)
+}
+
 fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
     let changed = relens_store::drift(project).context("failed to inspect drift")?;
     if changed.is_empty() {
@@ -217,5 +267,22 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
         bail!("automatic lifting of non-empty drift is not available in M1")
     } else {
         Ok(CommandResult::new("drift", changed.join(",")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_relative_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn accepts_only_paths_confined_to_the_destination() {
+        assert_eq!(
+            safe_relative_path("src/./main.rs").unwrap(),
+            PathBuf::from("src/main.rs")
+        );
+        for unsafe_path in ["", "/tmp/file", "../file", "src/../../file", "C:/file"] {
+            assert!(safe_relative_path(unsafe_path).is_err(), "{unsafe_path}");
+        }
     }
 }
