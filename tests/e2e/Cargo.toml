@@ -1,0 +1,15 @@
+[package]
+name = "relens-e2e"
+description = "Cucumber acceptance harness for relens"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+assert_cmd = "2"
+cucumber = "0.21"
+gherkin = "0.14"
+tempfile = "3"
