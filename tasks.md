@@ -74,10 +74,13 @@
 
 ## M5 — matrix と拡張
 
-- [ ] **[TODO] `matrix.feature`: 未実体化分岐の破損を検出する**
-- [ ] **[TODO] `matrix.feature`: pairwise 回答集合を生成する**
-- [ ] **[TODO] Migration の検出・実行・失敗時 rollback を実装する**
-- [ ] **[TODO] 検証ゲートを迂回できない `LiftSuggester` port を定義する**
+- [x] **[DONE] `matrix.feature`: 未実体化分岐の破損を検出する**
+- [x] **[DONE] `matrix.feature`: pairwise 回答集合を生成する**
+- [x] **[DONE] Migration の検出・実行・失敗時 rollback を実装する**
+- [x] **[DONE] 検証ゲートを迂回できない `LiftSuggester` port を定義する**
+  - Bool/Choice の pairwise covering array と `matrix` / `matrix --plan` を追加。
+  - `migrations/*.json` を名前順で適用し、失敗時は AnswerSet を変更しない純粋な migration として実装。
+  - 外部提案を未検証値として返す port を domain に置き、export の既存 Verified ゲートを維持。
 
 ## 継続的な完了条件
 

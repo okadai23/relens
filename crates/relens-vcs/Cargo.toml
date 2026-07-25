@@ -10,3 +10,4 @@ repository.workspace = true
 [dependencies]
 relens-domain = { version = "0.1.0", path = "../relens-domain" }
 thiserror.workspace = true
+walkdir.workspace = true
