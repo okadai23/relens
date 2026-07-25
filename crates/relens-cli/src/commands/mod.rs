@@ -60,10 +60,7 @@ fn new_project(
         if output.bytes.is_empty() {
             continue;
         }
-        let target = destination.join(&output_path);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let target = prepare_output_path(destination, &output_path)?;
         fs::write(&target, &output.bytes)?;
         rendered.insert(
             relens_store::portable_path(&output_path),
@@ -151,6 +148,43 @@ fn safe_relative_path(rendered: &str) -> Result<PathBuf> {
     Ok(safe)
 }
 
+/// Creates missing parent directories without ever traversing a symlink already
+/// present below the destination. The final component is checked too because
+/// `fs::write` would otherwise follow a symlink in place of the output file.
+fn prepare_output_path(destination: &Path, relative: &Path) -> Result<PathBuf> {
+    let mut target = destination.to_path_buf();
+    let component_count = relative.components().count();
+
+    for (index, component) in relative.components().enumerate() {
+        let Component::Normal(component) = component else {
+            bail!("output path is not a normalized relative path");
+        };
+        target.push(component);
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!("refusing to write through symlink `{}`", target.display());
+            }
+            Ok(metadata) if index + 1 < component_count && !metadata.is_dir() => {
+                bail!("output parent is not a directory: `{}`", target.display());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if index + 1 < component_count {
+                    fs::create_dir(&target).with_context(|| {
+                        format!("failed to create output directory {}", target.display())
+                    })?;
+                }
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", target.display()));
+            }
+        }
+    }
+
+    Ok(target)
+}
+
 fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
     let changed = relens_store::drift(project).context("failed to inspect drift")?;
     if changed.is_empty() {
@@ -167,8 +201,8 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_relative_path;
-    use std::path::PathBuf;
+    use super::{prepare_output_path, safe_relative_path};
+    use std::{fs, path::PathBuf};
 
     #[test]
     fn accepts_only_paths_confined_to_the_destination() {
@@ -179,5 +213,33 @@ mod tests {
         for unsafe_path in ["", "/tmp/file", "../file", "src/../../file", "C:/file"] {
             assert!(safe_relative_path(unsafe_path).is_err(), "{unsafe_path}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_below_the_destination() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("link")).unwrap();
+
+        let error = prepare_output_path(root.path(), &PathBuf::from("link/file")).unwrap_err();
+        assert!(error.to_string().contains("symlink"));
+        assert!(!outside.path().join("file").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlink_in_place_of_the_output_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        fs::write(&outside, "unchanged").unwrap();
+        symlink(&outside, root.path().join("output")).unwrap();
+
+        assert!(prepare_output_path(root.path(), &PathBuf::from("output")).is_err());
+        assert_eq!(fs::read_to_string(outside).unwrap(), "unchanged");
     }
 }
