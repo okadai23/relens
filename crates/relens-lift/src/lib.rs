@@ -1,6 +1,7 @@
 //! Pure drift lifting and PutGet verification.
 
-use relens_domain::{AnswerValue, Origin, SourceMap};
+use relens_domain::{AnswerValue, Origin, SourceMap, SourceSpan};
+use similar::{Algorithm, DiffOp, capture_diff_slices};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -51,9 +52,8 @@ pub enum LiftError {
 
 /// Lifts changed generated files into complete replacement template files.
 ///
-/// Complete replacements make patch application deterministic. Source maps identify
-/// which answer expressions must be restored; newly introduced Jinja delimiters are
-/// protected with raw blocks before those expressions are put back.
+/// Edits are projected onto the original template through its source map. This keeps
+/// control-flow tags and the exact spelling of expressions (including filters) intact.
 pub fn lift(
     changed: &BTreeSet<String>,
     templates: &BTreeMap<String, (String, String, SourceMap)>,
@@ -63,7 +63,7 @@ pub fn lift(
     let mut files = Vec::new();
     let mut patched = BTreeMap::new();
     for path in changed {
-        let Some((template_path, _, map)) = templates.get(path) else {
+        let Some((template_path, template, map)) = templates.get(path) else {
             files.push(LiftedFile {
                 project_path: path.clone(),
                 template_path: None,
@@ -76,15 +76,12 @@ pub fn lift(
         };
         let bytes = project.get(path).cloned().unwrap_or_default();
         let rendered = String::from_utf8(bytes).map_err(|_| LiftError::NonUtf8(path.clone()))?;
-        let variables = map
-            .spans
-            .iter()
-            .filter_map(|span| match &span.origin {
-                Origin::Expr { variable, .. } => Some(variable.clone()),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let content = inverse_render(&rendered, &variables, answers);
+        let pristine =
+            relens_engine::render(template, answers).map_err(|source| LiftError::Render {
+                path: path.clone(),
+                source,
+            })?;
+        let content = apply_rendered_edits(template, &pristine.bytes, rendered.as_bytes(), map);
         patched.insert(path.clone(), content.clone());
         files.push(LiftedFile {
             project_path: path.clone(),
@@ -121,31 +118,110 @@ pub fn lift(
     })
 }
 
-fn inverse_render(
-    rendered: &str,
-    variables: &BTreeSet<String>,
-    answers: &BTreeMap<String, AnswerValue>,
-) -> String {
-    let mut substitutions = variables
-        .iter()
-        .filter_map(|name| answers.get(name).map(|value| (name, value.display())))
-        .filter(|(_, value)| !value.is_empty())
+fn apply_rendered_edits(template: &str, pristine: &[u8], edited: &[u8], map: &SourceMap) -> String {
+    let mut replacements = capture_diff_slices(Algorithm::Myers, pristine, edited)
+        .into_iter()
+        .filter_map(|operation| match operation {
+            DiffOp::Equal { .. } => None,
+            DiffOp::Delete {
+                old_index,
+                old_len,
+                new_index,
+            } => Some((old_index, old_index + old_len, new_index, new_index)),
+            DiffOp::Insert {
+                old_index,
+                new_index,
+                new_len,
+            } => Some((old_index, old_index, new_index, new_index + new_len)),
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => Some((
+                old_index,
+                old_index + old_len,
+                new_index,
+                new_index + new_len,
+            )),
+        })
+        .filter_map(|(old_start, old_end, new_start, new_end)| {
+            template_range(map, template.len(), pristine.len(), old_start, old_end)
+                .map(|range| (range, &edited[new_start..new_end]))
+        })
         .collect::<Vec<_>>();
-    substitutions
-        .sort_by(|(a_name, a), (b_name, b)| b.len().cmp(&a.len()).then_with(|| a_name.cmp(b_name)));
-    let mut protected = rendered.to_owned();
-    let mut markers = Vec::new();
-    for (index, (name, value)) in substitutions.iter().enumerate() {
-        let marker = format!("\u{e000}{index}\u{e001}");
-        protected = protected.replace(value, &marker);
-        markers.push((marker, format!("{{{{ {name} }}}}")));
+
+    replacements.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut lifted = template.as_bytes().to_vec();
+    for (range, replacement) in replacements {
+        let replacement = protect_jinja(replacement);
+        lifted.splice(range, replacement);
     }
-    protected = protected.replace("{%", "{% raw %}{%{% endraw %}");
-    protected = protected.replace("{{", "{% raw %}{{{% endraw %}");
-    for (marker, expression) in markers {
-        protected = protected.replace(&marker, &expression);
+    String::from_utf8(lifted).expect("a UTF-8 template with UTF-8 edits remains UTF-8")
+}
+
+fn template_range(
+    map: &SourceMap,
+    template_len: usize,
+    rendered_len: usize,
+    rendered_start: usize,
+    rendered_end: usize,
+) -> Option<std::ops::Range<usize>> {
+    if rendered_start == rendered_end {
+        let offset = map
+            .spans
+            .iter()
+            .find(|span| {
+                matches!(span.origin, Origin::Literal { .. })
+                    && span.start <= rendered_start
+                    && rendered_start <= span.end
+            })
+            .and_then(|span| literal_offset(span, rendered_start))
+            .or({
+                // With no adjacent literal span (for example `{{ value }}` followed by
+                // an inserted suffix), the rendered file boundaries map to the template
+                // boundaries without consuming the expression itself.
+                match rendered_start {
+                    0 => Some(0),
+                    position if position == rendered_len => Some(template_len),
+                    _ => None,
+                }
+            })?;
+        return Some(offset..offset);
     }
-    protected
+    let first = map.spans.iter().find(|span| {
+        matches!(span.origin, Origin::Literal { .. })
+            && span.start <= rendered_start
+            && rendered_start < span.end
+    })?;
+    let last_position = rendered_end - 1;
+    let last = map.spans.iter().find(|span| {
+        matches!(span.origin, Origin::Literal { .. })
+            && span.start <= last_position
+            && last_position < span.end
+    })?;
+    // A range crossing an expression or block would also remove its template syntax.
+    // Leave such a change for manual mapping rather than corrupting the template.
+    if !std::ptr::eq(first, last) {
+        return None;
+    }
+    Some(literal_offset(first, rendered_start)?..literal_offset(last, rendered_end)?)
+}
+
+fn literal_offset(span: &SourceSpan, rendered_offset: usize) -> Option<usize> {
+    match span.origin {
+        Origin::Literal { template_start, .. } => {
+            Some(template_start + rendered_offset.saturating_sub(span.start))
+        }
+        _ => None,
+    }
+}
+
+fn protect_jinja(bytes: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(bytes)
+        .replace("{%", "{% raw %}{%{% endraw %}")
+        .replace("{{", "{% raw %}{{{% endraw %}")
+        .into_bytes()
 }
 
 #[cfg(test)]
@@ -168,16 +244,44 @@ mod tests {
     }
 
     #[test]
-    fn reverses_answer_values_and_protects_new_jinja() {
-        let answers = BTreeMap::from([("name".into(), AnswerValue::String("myapp".into()))]);
-        let variables = BTreeSet::from(["name".into()]);
-        let lifted = inverse_render("myapp {{ example }}", &variables, &answers);
-        assert!(lifted.contains("{{ name }}"));
-        assert!(lifted.contains("{% raw %}{{{% endraw %} example }}"));
+    fn preserves_blocks_and_filtered_expressions() {
+        let answers = BTreeMap::from([
+            ("enabled".into(), AnswerValue::Bool(true)),
+            ("name".into(), AnswerValue::String("myapp".into())),
+        ]);
+        let template = "{% if enabled %}project = {{ name | upper }}\nold text\n{% endif %}";
+        let pristine = relens_engine::render(template, &answers).unwrap();
+        let lifted = apply_rendered_edits(
+            template,
+            &pristine.bytes,
+            b"project = MYAPP\nnew text\n",
+            &pristine.source_map,
+        );
+
+        assert_eq!(
+            lifted,
+            "{% if enabled %}project = {{ name | upper }}\nnew text\n{% endif %}"
+        );
         assert_eq!(
             relens_engine::render(&lifted, &answers).unwrap().bytes,
-            b"myapp {{ example }}"
+            b"project = MYAPP\nnew text\n"
         );
+    }
+
+    #[test]
+    fn preserves_loops_when_editing_their_literal_body() {
+        let answers = BTreeMap::from([("letters".into(), AnswerValue::String("ab".into()))]);
+        let template = "{% for letter in letters %}item={{ letter }}\n{% endfor %}";
+        let pristine = relens_engine::render(template, &answers).unwrap();
+        let lifted = apply_rendered_edits(
+            template,
+            &pristine.bytes,
+            b"entry=a\nitem=b\n",
+            &pristine.source_map,
+        );
+
+        assert!(lifted.contains("{% for letter in letters %}"));
+        assert!(lifted.contains("{% endfor %}"));
     }
 
     #[test]
