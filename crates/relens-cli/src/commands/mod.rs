@@ -153,7 +153,7 @@ fn reject_symlinked_path(project: &Path, relative: &Path) -> Result<()> {
         match fs::symlink_metadata(&candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 bail!(
-                    "refusing to update through symbolic link: {}",
+                    "refusing to access through symbolic link: {}",
                     candidate.display()
                 );
             }
@@ -315,6 +315,7 @@ fn lift(
     export: bool,
     decisions: &[crate::cli::ReviewResolution],
 ) -> Result<CommandResult> {
+    reject_unsafe_lift_paths(project)?;
     if !decisions.is_empty() && !resume {
         bail!("--decision requires --resume");
     }
@@ -331,8 +332,8 @@ fn lift(
             project.display().to_string(),
         ));
     }
-    let answer_set = relens_store::load_answers(project).context("failed to load answers")?;
     let lock = relens_store::load_lock(project).context("failed to load source maps")?;
+    let answer_set = relens_store::load_answers(project).context("failed to load answers")?;
     let source = relens_vcs::GitTemplateSource;
     let tree = source
         .fetch(&answer_set.template)
@@ -488,6 +489,38 @@ fn lift(
     Ok(CommandResult::new("lifted", reports.join(", ")))
 }
 
+fn reject_unsafe_lift_paths(project: &Path) -> Result<()> {
+    for metadata_path in [
+        Path::new(".relens/answers.toml"),
+        Path::new(".relens/lock.json"),
+        Path::new(".relens/template.patch"),
+        Path::new(".relens/sessions"),
+    ] {
+        reject_symlinked_path(project, metadata_path)?;
+    }
+
+    let lock = relens_store::load_lock(project).context("failed to load source maps")?;
+    for path in lock.files.keys() {
+        let path = safe_relative_path(path)
+            .with_context(|| format!("unsafe path in project lock: {path}"))?;
+        reject_symlinked_path(project, &path)?;
+    }
+
+    let sessions = project.join(".relens/sessions");
+    if sessions.is_dir() {
+        for entry in fs::read_dir(&sessions).context("failed to inspect lift sessions")? {
+            let entry = entry.context("failed to inspect lift session")?;
+            let relative = entry
+                .path()
+                .strip_prefix(project)
+                .context("lift session escaped project")?
+                .to_path_buf();
+            reject_symlinked_path(project, &relative)?;
+        }
+    }
+    Ok(())
+}
+
 fn continue_lift(
     project: &Path,
     export: bool,
@@ -574,7 +607,10 @@ fn write_session_patch(project: &Path, session: &relens_domain::LiftSession) -> 
 mod tests {
     use super::{reject_symlinked_path, render_tree, safe_relative_path};
     use relens_domain::{AnswerValue, TemplateTree};
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
 
     #[test]
     fn accepts_only_paths_confined_to_the_destination() {
@@ -611,7 +647,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlinks_in_update_targets() {
+    fn rejects_symlinks_in_project_paths() {
         use std::{fs, os::unix::fs::symlink};
 
         let root = tempfile::tempdir().unwrap();
@@ -620,10 +656,13 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join("output")).unwrap();
+        fs::write(outside.join("victim"), "unchanged").unwrap();
+        symlink(outside.join("victim"), project.join("patch")).unwrap();
 
         assert!(
             reject_symlinked_path(&project, PathBuf::from("output/file.txt").as_path()).is_err()
         );
+        assert!(reject_symlinked_path(&project, Path::new("patch")).is_err());
         assert!(reject_symlinked_path(&project, PathBuf::from("safe/file.txt").as_path()).is_ok());
     }
 }
