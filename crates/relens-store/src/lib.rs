@@ -125,6 +125,10 @@ pub fn persist(
     let json = serde_json::to_vec_pretty(&LockFile { files }).map_err(|e| validation("lock", e))?;
     fs::write(meta.join("lock.json"), json).io(&meta)
 }
+pub fn load_answers(project: &Path) -> Result<AnswerSet, RelensError> {
+    let path = project.join(".relens/answers.toml");
+    toml::from_str(&fs::read_to_string(&path).io(&path)?).map_err(|e| validation("answers", e))
+}
 pub fn drift(project: &Path) -> Result<Vec<String>, RelensError> {
     let path = project.join(".relens/lock.json");
     let lock: LockFile =

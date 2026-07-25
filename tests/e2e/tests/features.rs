@@ -242,6 +242,151 @@ default = false
         .stdout(predicates::str::contains("no-patch"));
 }
 
+/// Executable cucumber-step coverage for the three M2 update scenarios.
+#[test]
+fn m2_update_scenarios() {
+    let root = tempfile::tempdir().unwrap();
+    let template = root.path().join("python-lib");
+    fs::create_dir_all(template.join("{{ project_name }}")).unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.project_name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ project_name }}\nOverview\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("{{ project_name }}/main.py.j2"),
+        "print('hello')\n",
+    )
+    .unwrap();
+    git_commit(&template, "v1");
+    let v1 = git_head(&template);
+
+    let clean = root.path().join("clean");
+    let independent = root.path().join("independent");
+    let conflicting = root.path().join("conflicting");
+    for project in [&clean, &independent, &conflicting] {
+        CliCommand::cargo_bin("relens")
+            .unwrap()
+            .args([
+                "new",
+                template.to_str().unwrap(),
+                "-d",
+                project.to_str().unwrap(),
+                "-a",
+                "project_name=myapp",
+            ])
+            .assert()
+            .success();
+    }
+    fs::write(
+        independent.join("myapp/main.py"),
+        "print('hello')\n# user line\n",
+    )
+    .unwrap();
+    fs::write(conflicting.join("README.md"), "# myapp\nLocal overview\n").unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ project_name }}\nTemplate overview\n## Install\n",
+    )
+    .unwrap();
+    git_commit(&template, "v2");
+    let v2 = git_head(&template);
+    assert_ne!(v1, v2);
+
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["update", clean.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(clean.join("README.md"))
+            .unwrap()
+            .contains("## Install")
+    );
+    assert!(
+        fs::read_to_string(clean.join(".relens/answers.toml"))
+            .unwrap()
+            .contains(&v2)
+    );
+
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["update", independent.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(independent.join("myapp/main.py"))
+            .unwrap()
+            .contains("# user line")
+    );
+    assert!(
+        fs::read_to_string(independent.join("README.md"))
+            .unwrap()
+            .contains("Template overview")
+    );
+
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["update", conflicting.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("README.md"));
+    assert!(
+        fs::read_to_string(conflicting.join("README.md"))
+            .unwrap()
+            .contains("<<<<<<< project")
+    );
+}
+
+fn git_commit(repository: &Path, message: &str) {
+    if !repository.join(".git").exists() {
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repository)
+            .status()
+            .unwrap();
+    }
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repository)
+        .status()
+        .unwrap();
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "user.name=Relens",
+            "-c",
+            "user.email=relens@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+        ])
+        .current_dir(repository)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+fn git_head(repository: &Path) -> String {
+    String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repository)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .into()
+}
+
 fn snapshot(root: &Path) -> BTreeSet<(String, Vec<u8>)> {
     walk(root)
         .into_iter()

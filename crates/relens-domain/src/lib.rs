@@ -74,6 +74,16 @@ pub struct AnswerSet {
     pub answers: BTreeMap<String, AnswerValue>,
 }
 
+/// A deterministic snapshot of the files in a template revision.
+pub type TemplateTree = BTreeMap<String, Vec<u8>>;
+
+/// Port used by update operations to obtain immutable template revisions.
+pub trait TemplateSource {
+    type Error: std::error::Error + Send + Sync + 'static;
+    fn fetch(&self, reference: &TemplateRef) -> Result<TemplateTree, Self::Error>;
+    fn latest(&self, locator: &str) -> Result<TemplateRef, Self::Error>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuestionKind {
     String,
