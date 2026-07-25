@@ -20,6 +20,12 @@ pub enum RelensError {
         #[source]
         source: io::Error,
     },
+    #[error("invalid configuration at {path}: {source}")]
+    InvalidConfiguration {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 /// A machine-serializable summary produced by a command.
@@ -44,9 +50,15 @@ pub fn initialize(path: &Path) -> Result<CommandResult, RelensError> {
 }
 
 pub fn inspect(path: &Path) -> Result<CommandResult, RelensError> {
-    fs::read(path).map_err(|source| RelensError::Io {
+    let contents = fs::read_to_string(path).map_err(|source| RelensError::Io {
         path: path.display().to_string(),
         source,
+    })?;
+    toml::from_str::<toml::Table>(&contents).map_err(|source| {
+        RelensError::InvalidConfiguration {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
     Ok(CommandResult {
         action: "inspected",
@@ -65,5 +77,16 @@ mod tests {
         let result = initialize(&path).unwrap();
         assert_eq!(result.action, "initialized");
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn inspect_rejects_malformed_configuration() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relens.toml");
+        fs::write(&path, "invalid = [").unwrap();
+
+        let error = inspect(&path).unwrap_err();
+
+        assert!(matches!(error, RelensError::InvalidConfiguration { .. }));
     }
 }
