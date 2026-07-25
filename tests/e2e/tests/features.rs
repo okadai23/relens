@@ -306,6 +306,31 @@ fn replace_lift_paths_with_symlinks(world: &mut RelensWorld) {
 }
 
 #[cfg(unix)]
+#[given(
+    "LiftSession の追加ファイルがプロジェクト外のファイルへのシンボリックリンクに置き換えられた"
+)]
+fn replace_session_edit_with_symlink(world: &mut RelensWorld) {
+    use std::os::unix::fs::symlink;
+
+    add_private_notes(world);
+    run_lift(world);
+
+    let project = world.project_directory.as_ref().unwrap();
+    let outside = world.root.as_ref().unwrap().path().join("resume-outside");
+    fs::write(&outside, "outside must remain unchanged").unwrap();
+    fs::remove_file(project.join("notes/private.md")).unwrap();
+    symlink(&outside, project.join("notes/private.md")).unwrap();
+    world.outside_file = Some(outside);
+}
+
+#[cfg(unix)]
+#[when(regex = r#"^\"relens lift --resume\" を裁定なしで実行する$"#)]
+fn resume_lift_without_decisions(world: &mut RelensWorld) {
+    let project = world.project_directory.clone().unwrap();
+    world.run_cli(&["lift", project.to_str().unwrap(), "--resume"]);
+}
+
+#[cfg(unix)]
 #[then("シンボリックリンクを拒否して終了する")]
 fn lift_rejects_symlinks(world: &mut RelensWorld) {
     let output = world.last_cli.as_ref().unwrap();
@@ -609,7 +634,7 @@ fn executes_completed_m3_lift_features_with_cucumber_steps() {
                     || scenario.name.contains("変数由来")
                     || scenario.name.contains("Jinjaメタ文字")
                     || scenario.name.contains("追加された無関係")
-                    || scenario.name.contains("シンボリックリンクを経由")
+                    || (cfg!(unix) && scenario.name.contains("シンボリックリンクを経由"))
             })
             .await;
         RelensWorld::cucumber()

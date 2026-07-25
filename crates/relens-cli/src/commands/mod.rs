@@ -528,6 +528,12 @@ fn continue_lift(
 ) -> Result<CommandResult> {
     let mut session =
         relens_store::load_session(project, None).context("failed to load lift session")?;
+    for edit in &session.edits {
+        let path = safe_relative_path(&edit.project_path).with_context(|| {
+            format!("unsafe project path in lift session: {}", edit.project_path)
+        })?;
+        reject_symlinked_path(project, &path)?;
+    }
     if export {
         if !decisions.is_empty() {
             bail!("--decision can only be used with --resume");

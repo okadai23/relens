@@ -59,7 +59,7 @@
   - CLI が記録済みテンプレートから検証済み `.relens/template.patch` を生成し、分類と検証結果を報告するよう更新。
   - M3 の cucumber シナリオと PutGet/GetPut property test、workspace 品質ゲートで検証。
   - `relens lift` が生成ファイル、メタデータ、セッション、TemplatePatch のシンボリックリンクを拒否し、
-    プロジェクト外を読み書きしないことを cucumber と unit test で検証。
+    セッション再開時の追加ファイルも含めてプロジェクト外を読み書きしないことを cucumber と unit test で検証。
 
 ## M4 — review、session、export
 
