@@ -403,7 +403,13 @@ fn choose_keep_literal(_: &mut RelensWorld) {}
 #[when(regex = r#"^\"relens lift --resume\" を実行する$"#)]
 fn resume_lift(world: &mut RelensWorld) {
     let project = world.project_directory.clone().unwrap();
-    world.run_cli(&["lift", project.to_str().unwrap(), "--resume"]);
+    world.run_cli(&[
+        "lift",
+        project.to_str().unwrap(),
+        "--resume",
+        "--decision",
+        "0=keep-literal",
+    ]);
 }
 
 #[then(regex = r#"^セッションの状態は \"Verified\" に遷移する$"#)]

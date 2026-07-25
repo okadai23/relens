@@ -1,6 +1,6 @@
 //! Pure drift lifting and PutGet verification.
 
-use relens_domain::{AnswerValue, Origin, SourceMap, SourceSpan};
+use relens_domain::{AnswerValue, LiftSession, Origin, ReviewDecision, SourceMap, SourceSpan};
 use similar::{Algorithm, DiffOp, capture_diff_slices};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -54,6 +54,43 @@ pub enum LiftError {
         #[source]
         source: relens_engine::RenderError,
     },
+}
+
+/// Renders every applicable decision in a reviewed session and compares it with the project.
+pub fn verify_session(
+    session: &LiftSession,
+    project: &BTreeMap<String, Vec<u8>>,
+    answers: &BTreeMap<String, AnswerValue>,
+) -> Result<Vec<Divergence>, LiftError> {
+    let mut divergences = Vec::new();
+    for edit in &session.edits {
+        if matches!(
+            edit.decision,
+            ReviewDecision::Pending | ReviewDecision::Unmappable
+        ) {
+            continue;
+        }
+        let content = if edit.decision == ReviewDecision::Substitute {
+            edit.substituted.as_deref().unwrap_or(&edit.literal)
+        } else {
+            &edit.literal
+        };
+        let actual = relens_engine::render(content, answers)
+            .map_err(|source| LiftError::Render {
+                path: edit.project_path.clone(),
+                source,
+            })?
+            .bytes;
+        let expected = project.get(&edit.project_path).cloned().unwrap_or_default();
+        if actual != expected {
+            divergences.push(Divergence {
+                path: edit.project_path.clone(),
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(divergences)
 }
 
 /// Lifts changed generated files into complete replacement template files.
@@ -344,6 +381,43 @@ mod tests {
         assert!(matches!(&result.files[0].classification,
             Classification::Ambiguous { literal, substituted }
             if literal.contains("run main here") && substituted.contains("run {{ project_name }} here")));
+    }
+
+    #[test]
+    fn reviewed_choice_is_rendered_before_verification() {
+        let answers = BTreeMap::from([("project_name".into(), AnswerValue::String("main".into()))]);
+        let mut session = LiftSession {
+            id: "session".into(),
+            project: "project".into(),
+            template: relens_domain::TemplateRef::new("template", "revision").unwrap(),
+            state: relens_domain::LiftSessionState::Reviewing,
+            edits: vec![relens_domain::SessionEdit {
+                project_path: "README.md".into(),
+                template_path: Some("README.md.j2".into()),
+                literal: "run main here\n".into(),
+                substituted: Some("run {{ project_name }} here\n".into()),
+                decision: ReviewDecision::Substitute,
+            }],
+            divergences: vec![],
+        };
+
+        let matching = BTreeMap::from([("README.md".into(), b"run main here\n".to_vec())]);
+        assert!(
+            verify_session(&session, &matching, &answers)
+                .unwrap()
+                .is_empty()
+        );
+
+        session.edits[0].decision = ReviewDecision::KeepLiteral;
+        let changed_answers =
+            BTreeMap::from([("project_name".into(), AnswerValue::String("other".into()))]);
+        let divergences = verify_session(&session, &matching, &changed_answers).unwrap();
+        assert!(divergences.is_empty(), "literal choice must remain literal");
+
+        session.edits[0].decision = ReviewDecision::Substitute;
+        let divergences = verify_session(&session, &matching, &changed_answers).unwrap();
+        assert_eq!(divergences[0].path, "README.md");
+        assert_eq!(divergences[0].actual, b"run other here\n");
     }
 
     proptest! {
