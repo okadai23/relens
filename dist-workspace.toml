@@ -1,0 +1,11 @@
+[dist]
+cargo-dist-version = "0.30.0"
+ci = "github"
+installers = ["shell", "powershell"]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+  "aarch64-apple-darwin",
+]
+github-attestations = true
+
