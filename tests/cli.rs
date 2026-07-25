@@ -38,3 +38,18 @@ fn initializes_and_inspects_json() {
         .success()
         .stdout(predicate::str::contains("\"action\":\"inspected\""));
 }
+
+#[test]
+fn rejects_malformed_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "invalid = [").unwrap();
+
+    Command::cargo_bin("relens")
+        .unwrap()
+        .args(["run", path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("invalid configuration"));
+}
