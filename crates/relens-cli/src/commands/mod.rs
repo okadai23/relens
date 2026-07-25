@@ -18,7 +18,7 @@ pub fn execute(command: Command) -> Result<CommandResult> {
             answers,
         } => new_project(&template, &destination, &answers),
         Command::Drift { project } => drift(&project, false),
-        Command::Lift { project } => drift(&project, true),
+        Command::Lift { project } => lift(&project),
         Command::Update { project } => update(&project),
         Command::Init { path } => {
             relens_store::initialize(&path).context("failed to initialize relens")
@@ -292,10 +292,98 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
             project.display().to_string(),
         ))
     } else if lift {
-        bail!("automatic lifting of non-empty drift is not available in M1")
+        unreachable!("lift uses the dedicated command path")
     } else {
         Ok(CommandResult::new("drift", changed.join(",")))
     }
+}
+
+fn lift(project: &Path) -> Result<CommandResult> {
+    let changed = relens_store::drift(project)
+        .context("failed to inspect drift")?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if changed.is_empty() {
+        return Ok(CommandResult::new(
+            "no-patch",
+            project.display().to_string(),
+        ));
+    }
+    let answer_set = relens_store::load_answers(project).context("failed to load answers")?;
+    let lock = relens_store::load_lock(project).context("failed to load source maps")?;
+    let source = relens_vcs::GitTemplateSource;
+    let tree = source
+        .fetch(&answer_set.template)
+        .context("failed to fetch recorded template")?;
+    let rendered = render_tree(&tree, &answer_set.answers)?;
+    let mut templates = BTreeMap::new();
+    for (template_path, bytes) in &tree {
+        if template_path == "relens.toml" {
+            continue;
+        }
+        let rendered_path = relens_engine::render(template_path, &answer_set.answers)
+            .with_context(|| format!("failed to render template path {template_path}"))?;
+        let rendered_path = String::from_utf8(rendered_path.bytes)
+            .context("rendered template path is not UTF-8")?;
+        let rendered_path = rendered_path.strip_suffix(".j2").unwrap_or(&rendered_path);
+        let portable = relens_store::portable_path(&safe_relative_path(rendered_path)?);
+        if let Some(locked) = lock.files.get(&portable) {
+            templates.insert(
+                portable,
+                (
+                    template_path.clone(),
+                    String::from_utf8(bytes.clone())
+                        .with_context(|| format!("template {template_path} is not UTF-8"))?,
+                    locked.source_map.clone(),
+                ),
+            );
+        }
+    }
+    let mut project_files = BTreeMap::new();
+    for path in &changed {
+        if let Ok(bytes) = fs::read(project.join(path)) {
+            project_files.insert(path.clone(), bytes);
+        }
+    }
+    // Include pristine mapped files for consistent lookup and future multi-file verification.
+    for (path, (bytes, _)) in rendered {
+        project_files.entry(path).or_insert(bytes);
+    }
+    let result = relens_lift::lift(&changed, &templates, &project_files, &answer_set.answers)
+        .context("failed to lift drift")?;
+    if let relens_lift::Verification::Fail(divergences) = &result.verification {
+        let paths = divergences
+            .iter()
+            .map(|divergence| divergence.path.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        bail!("round-trip verification failed: {paths}");
+    }
+    let patch_path = project.join(".relens/template.patch");
+    let mut patch = String::new();
+    let mut reports = Vec::new();
+    for file in &result.files {
+        match (&file.classification, &file.template_path, &file.content) {
+            (relens_lift::Classification::Auto, Some(path), Some(content)) => {
+                patch.push_str(&format!(
+                    "--- a/{path}\n+++ b/{path}\n@@ replacement @@\n{content}"
+                ));
+                if !content.ends_with('\n') {
+                    patch.push('\n');
+                }
+                reports.push(format!("{}:Auto", file.project_path));
+            }
+            (relens_lift::Classification::Unmappable { suggestion }, _, _) => {
+                reports.push(format!("{}:Unmappable ({suggestion})", file.project_path));
+            }
+            _ => {}
+        }
+    }
+    if !patch.is_empty() {
+        fs::write(&patch_path, patch).context("failed to write template patch")?;
+    }
+    reports.push("verification:Pass".into());
+    Ok(CommandResult::new("lifted", reports.join(", ")))
 }
 
 #[cfg(test)]

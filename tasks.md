@@ -49,12 +49,15 @@
 
 ## M3 — Auto lift と verify
 
-- [ ] **[TODO] `lift.feature`: リテラル部分の修正を Auto で持ち上げる**
-- [ ] **[TODO] `lift.feature`: 変数由来値を逆置換する**
-- [ ] **[TODO] `lift.feature`: Jinja メタ文字を raw block で保護する**
-- [ ] **[TODO] `lift.feature`: 追加ファイルを Unmappable として扱う**
-- [ ] **[TODO] `roundtrip.feature`: PutGet のシナリオアウトライン**
-- [ ] **[TODO] PutGet/GetPut の proptest generator と shrinking を実装する**
+- [x] **[DONE] `lift.feature`: リテラル部分の修正を Auto で持ち上げる**
+- [x] **[DONE] `lift.feature`: 変数由来値を逆置換する**
+- [x] **[DONE] `lift.feature`: Jinja メタ文字を raw block で保護する**
+- [x] **[DONE] `lift.feature`: 追加ファイルを Unmappable として扱う**
+- [x] **[DONE] `roundtrip.feature`: PutGet のシナリオアウトライン**
+- [x] **[DONE] PutGet/GetPut の proptest generator と shrinking を実装する**
+  - SourceMap の式由来を使う逆置換、Jinja raw 保護、追加ファイルの提案付き分類を `relens-lift` に実装。
+  - CLI が記録済みテンプレートから検証済み `.relens/template.patch` を生成し、分類と検証結果を報告するよう更新。
+  - M3 の cucumber シナリオと PutGet/GetPut property test、workspace 品質ゲートで検証。
 
 ## M4 — review、session、export
 

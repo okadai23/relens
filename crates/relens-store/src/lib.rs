@@ -129,10 +129,12 @@ pub fn load_answers(project: &Path) -> Result<AnswerSet, RelensError> {
     let path = project.join(".relens/answers.toml");
     toml::from_str(&fs::read_to_string(&path).io(&path)?).map_err(|e| validation("answers", e))
 }
-pub fn drift(project: &Path) -> Result<Vec<String>, RelensError> {
+pub fn load_lock(project: &Path) -> Result<LockFile, RelensError> {
     let path = project.join(".relens/lock.json");
-    let lock: LockFile =
-        serde_json::from_slice(&fs::read(&path).io(&path)?).map_err(|e| validation("lock", e))?;
+    serde_json::from_slice(&fs::read(&path).io(&path)?).map_err(|e| validation("lock", e))
+}
+pub fn drift(project: &Path) -> Result<Vec<String>, RelensError> {
+    let lock = load_lock(project)?;
     let locked_paths = lock
         .files
         .keys()
