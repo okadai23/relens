@@ -27,6 +27,9 @@
 - [x] **[DONE] `render.feature`: 回答を与えてプロジェクトを生成する**
 - [x] **[DONE] `render.feature`: 生成結果は決定的である**
 - [x] **[DONE] `render.feature`: 由来マップが出力全体を被覆する**
+- [x] **[DONE] `render.feature`: 生成先のシンボリックリンクをたどらない**
+  - 既存の出力ファイルが外部ファイルへのシンボリックリンクの場合に `relens new` が失敗し、外部ファイルを変更しないことを Cucumber E2E で検証。
+  - 出力先配下のシンボリックリンク拒否は `commands::tests` の unit test と `cargo test --workspace --all-features --locked` で検証。
 - [x] **[DONE] `roundtrip.feature`: GetPut 則 — ドリフトがなければパッチは空**
 - [x] **[DONE] Questionnaire / AnswerSet / TemplateRef の型と検証を実装する**
 - [x] **[DONE] Jinja サブセット parser と非対応構文の診断を実装する**
