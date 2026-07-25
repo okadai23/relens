@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 relens-domain = { version = "0.1.0", path = "../relens-domain" }
 relens-engine = { version = "0.1.0", path = "../relens-engine" }
+similar = "2"
 thiserror.workspace = true
 
 [dev-dependencies]
