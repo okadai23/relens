@@ -19,6 +19,24 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Render a new project from a template.
+    New {
+        template: PathBuf,
+        #[arg(long, short = 'd', default_value = ".")]
+        destination: PathBuf,
+        #[arg(long = "answer", short = 'a', value_name = "NAME=VALUE")]
+        answers: Vec<String>,
+    },
+    /// Report files changed since generation.
+    Drift {
+        #[arg(default_value = ".")]
+        project: PathBuf,
+    },
+    /// Lift project drift (M1 supports the empty GetPut case).
+    Lift {
+        #[arg(default_value = ".")]
+        project: PathBuf,
+    },
     /// Create a starter configuration file.
     Init {
         #[arg(default_value = "relens.toml")]
