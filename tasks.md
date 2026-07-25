@@ -72,6 +72,10 @@
 
 ## M5 — matrix と拡張
 
+- [x] **[DONE] Lift export の symlink 経由によるリポジトリ外書き込みを防止する**
+  - capability-based な相対ファイル操作で export 先を template repository 内に制限した。
+  - symlink が指す外部ファイルを変更しない regression unit test を追加した。
+
 - [ ] **[TODO] `matrix.feature`: 未実体化分岐の破損を検出する**
 - [ ] **[TODO] `matrix.feature`: pairwise 回答集合を生成する**
 - [ ] **[TODO] Migration の検出・実行・失敗時 rollback を実装する**

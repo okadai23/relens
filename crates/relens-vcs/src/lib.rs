@@ -1,9 +1,9 @@
 //! Git-backed template source adapter.
 
+use cap_std::{ambient_authority, fs::Dir};
 pub use relens_domain as domain;
 use relens_domain::{LiftSession, ReviewDecision, TemplateRef, TemplateSource, TemplateTree};
 use std::{
-    fs,
     path::{Component, Path},
     process::Command,
 };
@@ -45,6 +45,13 @@ impl GitTemplateSource {
 /// Applies a verified session on a dedicated branch and commits it.
 pub fn export_lift(session: &LiftSession) -> Result<String, GitError> {
     let repository = Path::new(&session.template.locator);
+    let repository_dir =
+        Dir::open_ambient_dir(repository, ambient_authority()).map_err(|error| {
+            GitError::Command {
+                repository: repository.display().to_string(),
+                message: error.to_string(),
+            }
+        })?;
     let project = Path::new(&session.project)
         .file_name()
         .and_then(|name| name.to_str())
@@ -70,17 +77,20 @@ pub fn export_lift(session: &LiftSession) -> Result<String, GitError> {
         } else {
             &edit.literal
         };
-        let target = repository.join(path);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|error| GitError::Command {
+        if let Some(parent) = path.parent() {
+            repository_dir
+                .create_dir_all(parent)
+                .map_err(|error| GitError::Command {
+                    repository: repository.display().to_string(),
+                    message: error.to_string(),
+                })?;
+        }
+        repository_dir
+            .write(path, content)
+            .map_err(|error| GitError::Command {
                 repository: repository.display().to_string(),
                 message: error.to_string(),
             })?;
-        }
-        fs::write(&target, content).map_err(|error| GitError::Command {
-            repository: repository.display().to_string(),
-            message: error.to_string(),
-        })?;
     }
     GitTemplateSource::git(repository, &["add", "--all"])?;
     let message = format!(
@@ -127,5 +137,65 @@ impl TemplateSource for GitTemplateSource {
     fn latest(&self, locator: &str) -> Result<TemplateRef, Self::Error> {
         let revision = Self::git(Path::new(locator), &["rev-parse", "HEAD"])?;
         TemplateRef::new(locator, String::from_utf8_lossy(&revision).trim()).map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use relens_domain::{LiftSessionState, SessionEdit};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn export_does_not_write_through_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let repository = root.path().join("template");
+        let victim = root.path().join("victim");
+        fs::create_dir(&repository).unwrap();
+        fs::write(&victim, "safe").unwrap();
+        GitTemplateSource::git(&repository, &["init"]).unwrap();
+        GitTemplateSource::git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Relens",
+                "-c",
+                "user.email=relens@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        let revision =
+            String::from_utf8(GitTemplateSource::git(&repository, &["rev-parse", "HEAD"]).unwrap())
+                .unwrap();
+        symlink(&victim, repository.join("link.j2")).unwrap();
+        let session = LiftSession {
+            id: "session".into(),
+            project: root.path().join("project").display().to_string(),
+            template: TemplateRef::new(
+                repository.display().to_string(),
+                revision.trim().to_owned(),
+            )
+            .unwrap(),
+            state: LiftSessionState::Verified,
+            edits: vec![SessionEdit {
+                project_path: "output".into(),
+                template_path: Some("link.j2".into()),
+                literal: "attacker controlled".into(),
+                substituted: None,
+                decision: ReviewDecision::KeepLiteral,
+            }],
+            divergences: vec![],
+        };
+
+        assert!(export_lift(&session).is_err());
+        assert_eq!(fs::read_to_string(victim).unwrap(), "safe");
     }
 }
