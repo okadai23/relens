@@ -21,8 +21,9 @@ pub fn execute(command: Command) -> Result<CommandResult> {
         Command::Lift {
             project,
             resume,
+            decisions,
             export,
-        } => lift(&project, resume, export),
+        } => lift(&project, resume, export, &decisions),
         Command::Update { project } => update(&project),
         Command::Init { path } => {
             relens_store::initialize(&path).context("failed to initialize relens")
@@ -308,9 +309,17 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
     }
 }
 
-fn lift(project: &Path, resume: bool, export: bool) -> Result<CommandResult> {
+fn lift(
+    project: &Path,
+    resume: bool,
+    export: bool,
+    decisions: &[crate::cli::ReviewResolution],
+) -> Result<CommandResult> {
+    if !decisions.is_empty() && !resume {
+        bail!("--decision requires --resume");
+    }
     if resume || export {
-        return continue_lift(project, export);
+        return continue_lift(project, export, decisions);
     }
     let changed = relens_store::drift(project)
         .context("failed to inspect drift")?
@@ -479,10 +488,17 @@ fn lift(project: &Path, resume: bool, export: bool) -> Result<CommandResult> {
     Ok(CommandResult::new("lifted", reports.join(", ")))
 }
 
-fn continue_lift(project: &Path, export: bool) -> Result<CommandResult> {
+fn continue_lift(
+    project: &Path,
+    export: bool,
+    decisions: &[crate::cli::ReviewResolution],
+) -> Result<CommandResult> {
     let mut session =
         relens_store::load_session(project, None).context("failed to load lift session")?;
     if export {
+        if !decisions.is_empty() {
+            bail!("--decision can only be used with --resume");
+        }
         if !session.divergences.is_empty() {
             let locations = session
                 .divergences
@@ -497,23 +513,38 @@ fn continue_lift(project: &Path, export: bool) -> Result<CommandResult> {
         relens_store::save_session(project, &session)?;
         return Ok(CommandResult::new("exported", branch));
     }
-    let pending = session
+    for resolution in decisions {
+        let decision = match resolution.choice {
+            crate::cli::ReviewChoice::KeepLiteral => relens_domain::ReviewDecision::KeepLiteral,
+            crate::cli::ReviewChoice::Substitute => relens_domain::ReviewDecision::Substitute,
+        };
+        session.resolve(resolution.edit, decision)?;
+    }
+    let answers = relens_store::load_answers(project).context("failed to load answers")?;
+    let project_files = session
         .edits
         .iter()
-        .enumerate()
-        .filter_map(|(index, edit)| {
-            (edit.decision == relens_domain::ReviewDecision::Pending).then_some(index)
+        .filter_map(|edit| {
+            fs::read(project.join(&edit.project_path))
+                .ok()
+                .map(|bytes| (edit.project_path.clone(), bytes))
         })
-        .collect::<Vec<_>>();
-    for index in pending {
-        session.resolve(index, relens_domain::ReviewDecision::KeepLiteral)?;
-    }
-    session.verify(vec![])?;
+        .collect();
+    let divergences = relens_lift::verify_session(&session, &project_files, &answers.answers)
+        .context("failed to verify reviewed lift")?
+        .into_iter()
+        .map(|item| relens_domain::SessionDivergence {
+            path: item.path,
+            start: 0,
+            end: item.expected.len().max(item.actual.len()),
+        })
+        .collect();
+    session.verify(divergences)?;
     write_session_patch(project, &session)?;
     relens_store::save_session(project, &session)?;
     Ok(CommandResult::new(
         "resumed",
-        format!("session:{}, state:Verified", session.id),
+        format!("session:{}, state:{:?}", session.id, session.state),
     ))
 }
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -36,9 +36,12 @@ pub enum Command {
     Lift {
         #[arg(default_value = ".")]
         project: PathBuf,
-        /// Resume the latest review session, keeping pending matches literal.
+        /// Resume the latest review session after applying explicit review decisions.
         #[arg(long)]
         resume: bool,
+        /// Resolve a pending edit (for example, `0=keep-literal` or `0=substitute`).
+        #[arg(long = "decision", value_name = "EDIT=CHOICE")]
+        decisions: Vec<ReviewResolution>,
         /// Export the latest verified session to a Git branch.
         #[arg(long)]
         export: bool,
@@ -58,6 +61,35 @@ pub enum Command {
         #[arg(default_value = "relens.toml")]
         path: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ReviewChoice {
+    KeepLiteral,
+    Substitute,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ReviewResolution {
+    pub edit: usize,
+    pub choice: ReviewChoice,
+}
+
+impl FromStr for ReviewResolution {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (edit, choice) = value
+            .split_once('=')
+            .ok_or_else(|| "expected EDIT=CHOICE".to_string())?;
+        let edit = edit
+            .parse()
+            .map_err(|_| format!("invalid edit index `{edit}`"))?;
+        let choice = ReviewChoice::from_str(choice, true).map_err(|_| {
+            format!("invalid choice `{choice}`; expected keep-literal or substitute")
+        })?;
+        Ok(Self { edit, choice })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
