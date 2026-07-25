@@ -142,7 +142,7 @@ fn reject_symlinked_path(project: &Path, relative: &Path) -> Result<()> {
         match fs::symlink_metadata(&candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 bail!(
-                    "refusing to update through symbolic link: {}",
+                    "refusing to access through symbolic link: {}",
                     candidate.display()
                 );
             }
@@ -299,6 +299,17 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
 }
 
 fn lift(project: &Path) -> Result<CommandResult> {
+    for metadata_path in [
+        Path::new(".relens/answers.toml"),
+        Path::new(".relens/lock.json"),
+        Path::new(".relens/template.patch"),
+    ] {
+        reject_symlinked_path(project, metadata_path)?;
+    }
+    let lock = relens_store::load_lock(project).context("failed to load source maps")?;
+    for path in lock.files.keys() {
+        reject_symlinked_path(project, Path::new(path))?;
+    }
     let changed = relens_store::drift(project)
         .context("failed to inspect drift")?
         .into_iter()
@@ -310,7 +321,6 @@ fn lift(project: &Path) -> Result<CommandResult> {
         ));
     }
     let answer_set = relens_store::load_answers(project).context("failed to load answers")?;
-    let lock = relens_store::load_lock(project).context("failed to load source maps")?;
     let source = relens_vcs::GitTemplateSource;
     let tree = source
         .fetch(&answer_set.template)
@@ -427,7 +437,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn rejects_symlinks_in_update_targets() {
+    fn rejects_symlinks_in_project_paths() {
         use std::{fs, os::unix::fs::symlink};
 
         let root = tempfile::tempdir().unwrap();
@@ -436,10 +446,13 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(&outside).unwrap();
         symlink(&outside, project.join("output")).unwrap();
+        fs::write(outside.join("victim"), "unchanged").unwrap();
+        symlink(outside.join("victim"), project.join("patch")).unwrap();
 
         assert!(
             reject_symlinked_path(&project, PathBuf::from("output/file.txt").as_path()).is_err()
         );
+        assert!(reject_symlinked_path(&project, PathBuf::from("patch").as_path()).is_err());
         assert!(reject_symlinked_path(&project, PathBuf::from("safe/file.txt").as_path()).is_ok());
     }
 }

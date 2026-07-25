@@ -18,6 +18,7 @@ pub struct RelensWorld {
     last_cli: Option<CliOutput>,
     session_id: Option<String>,
     second_project: Option<PathBuf>,
+    outside_file: Option<PathBuf>,
 }
 
 impl Default for RelensWorld {
@@ -29,6 +30,7 @@ impl Default for RelensWorld {
             last_cli: None,
             session_id: None,
             second_project: None,
+            outside_file: None,
         }
     }
 }
@@ -284,6 +286,37 @@ fn add_private_notes(world: &mut RelensWorld) {
     fs::write(path, "private").unwrap();
 }
 
+#[cfg(unix)]
+#[given("生成ファイルと TemplatePatch がプロジェクト外のファイルへのシンボリックリンクである")]
+fn replace_lift_paths_with_symlinks(world: &mut RelensWorld) {
+    use std::os::unix::fs::symlink;
+
+    let project = world.project_directory.as_ref().unwrap();
+    let outside = world.root.as_ref().unwrap().path().join("outside");
+    fs::write(&outside, "outside must remain unchanged").unwrap();
+    fs::remove_file(project.join("README.md")).unwrap();
+    symlink(&outside, project.join("README.md")).unwrap();
+    symlink(&outside, project.join(".relens/template.patch")).unwrap();
+    world.outside_file = Some(outside);
+}
+
+#[cfg(unix)]
+#[then("シンボリックリンクを拒否して終了する")]
+fn lift_rejects_symlinks(world: &mut RelensWorld) {
+    let output = world.last_cli.as_ref().unwrap();
+    assert_ne!(output.status, 0);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("symbolic link"));
+}
+
+#[cfg(unix)]
+#[then("プロジェクト外のファイルは変更されない")]
+fn outside_file_unchanged(world: &mut RelensWorld) {
+    assert_eq!(
+        fs::read_to_string(world.outside_file.as_ref().unwrap()).unwrap(),
+        "outside must remain unchanged"
+    );
+}
+
 fn patch(world: &RelensWorld) -> String {
     fs::read_to_string(
         world
@@ -422,6 +455,7 @@ fn executes_completed_m3_lift_features_with_cucumber_steps() {
                     || scenario.name.contains("変数由来")
                     || scenario.name.contains("Jinjaメタ文字")
                     || scenario.name.contains("追加された無関係")
+                    || scenario.name.contains("シンボリックリンクを経由")
             })
             .await;
         RelensWorld::cucumber()

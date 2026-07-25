@@ -58,6 +58,8 @@
   - SourceMap の式由来を使う逆置換、Jinja raw 保護、追加ファイルの提案付き分類を `relens-lift` に実装。
   - CLI が記録済みテンプレートから検証済み `.relens/template.patch` を生成し、分類と検証結果を報告するよう更新。
   - M3 の cucumber シナリオと PutGet/GetPut property test、workspace 品質ゲートで検証。
+  - `relens lift` が生成ファイルやメタデータ、TemplatePatch のシンボリックリンクを拒否し、
+    プロジェクト外を読み書きしないことを cucumber と unit test で検証。
 
 ## M4 — review、session、export
 
