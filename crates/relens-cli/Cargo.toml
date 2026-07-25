@@ -30,6 +30,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 assert_cmd = "2"
 cucumber = "0.21"
+futures = "0.3"
 gherkin = "0.14"
 predicates = "3"
 tempfile = "3"
