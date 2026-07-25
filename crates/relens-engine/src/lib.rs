@@ -22,15 +22,13 @@ pub fn render(
     source: &str,
     answers: &BTreeMap<String, AnswerValue>,
 ) -> Result<RenderedText, RenderError> {
-    let mut node = 0;
-    render_range(source, 0, answers, &mut node)
+    render_range(source, 0, answers)
 }
 
 fn render_range(
     source: &str,
     base: usize,
     answers: &BTreeMap<String, AnswerValue>,
-    node: &mut u64,
 ) -> Result<RenderedText, RenderError> {
     let mut output = Vec::new();
     let mut spans = Vec::new();
@@ -87,14 +85,13 @@ fn render_range(
                     }
                 };
             }
-            *node += 1;
             push(
                 &mut output,
                 &mut spans,
                 value.as_bytes(),
                 Origin::Expr {
                     variable: variable.into(),
-                    node_id: *node,
+                    node_id: node_id(base + next),
                 },
             );
             cursor = close + 2;
@@ -141,9 +138,8 @@ fn render_range(
                     branch_condition = next_condition;
                 }
                 let (start, end) = selected.unwrap_or((body_start, body_start));
-                *node += 1;
-                let block_node = *node;
-                let child = render_range(&source[start..end], base + start, answers, node)?;
+                let block_node = node_id(base + next);
+                let child = render_range(&source[start..end], base + start, answers)?;
                 if child.bytes.is_empty() {
                     push(
                         &mut output,
@@ -182,7 +178,6 @@ fn render_range(
                         ));
                     }
                 };
-                *node += 1;
                 for value in values {
                     let mut local_answers = answers.clone();
                     local_answers.insert(variable.trim().into(), value);
@@ -190,7 +185,6 @@ fn render_range(
                         &source[body_start..end_marker],
                         base + body_start,
                         &local_answers,
-                        node,
                     )?;
                     append(&mut output, &mut spans, child);
                 }
@@ -279,6 +273,15 @@ fn valid_name(v: &str) -> bool {
         && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && !v.as_bytes()[0].is_ascii_digit()
 }
+/// A node's source byte offset is stable regardless of which branches execute
+/// or how many times a loop body is rendered. Adding one reserves zero as an
+/// invalid/sentinel ID while retaining a unique ID for every syntax node.
+fn node_id(template_offset: usize) -> u64 {
+    u64::try_from(template_offset)
+        .expect("template offsets fit in u64")
+        .checked_add(1)
+        .expect("template offset cannot exhaust u64")
+}
 fn syntax(offset: usize, message: &str) -> RenderError {
     RenderError::Syntax {
         offset,
@@ -341,6 +344,47 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), 2);
         assert_ne!(ids[0], ids[1]);
+    }
+    #[test]
+    fn keeps_node_ids_stable_across_runtime_choices() {
+        let template = "{% if on %}{{ name }} {{ name }}{% else %}{{ name }}{% endif %} {{ name }}";
+        let enabled = render(template, &answers()).unwrap();
+        let mut disabled_answers = answers();
+        disabled_answers.insert("on".into(), AnswerValue::Bool(false));
+        let disabled = render(template, &disabled_answers).unwrap();
+
+        let last_expr_id = |rendered: &RenderedText| {
+            rendered
+                .source_map
+                .spans
+                .iter()
+                .rev()
+                .find_map(|span| match span.origin {
+                    Origin::Expr { node_id, .. } => Some(node_id),
+                    _ => None,
+                })
+        };
+        assert_eq!(last_expr_id(&enabled), last_expr_id(&disabled));
+    }
+
+    #[test]
+    fn reuses_a_loop_body_node_id_for_every_iteration() {
+        let rendered = render(
+            "{% for letter in name %}{{ letter }}{% endfor %}",
+            &answers(),
+        )
+        .unwrap();
+        let ids: Vec<_> = rendered
+            .source_map
+            .spans
+            .iter()
+            .filter_map(|span| match span.origin {
+                Origin::Expr { node_id, .. } => Some(node_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.windows(2).all(|pair| pair[0] == pair[1]));
     }
     #[test]
     fn renders_elif_and_for_blocks() {
