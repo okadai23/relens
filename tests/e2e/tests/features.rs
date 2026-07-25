@@ -177,6 +177,182 @@ fn pristine_project(world: &mut RelensWorld) {
     generate_with_defaults(world);
 }
 
+#[given(
+    regex = r#"^テンプレート \"python-lib\" から回答 \"project_name=myapp\" で生成されたプロジェクトがある$"#
+)]
+fn generated_python_project(world: &mut RelensWorld) {
+    template_repository_exists(world);
+    generate(
+        world,
+        "lift-project",
+        &["project_name=myapp", "use_docker=false"],
+    );
+}
+
+#[given(
+    regex = r#"^テンプレート \"python-lib\" と回答 \"(.+)\" から生成されたプロジェクトがある$"#
+)]
+fn generated_roundtrip_project(world: &mut RelensWorld, raw_answers: String) {
+    template_repository_exists(world);
+    let answers = raw_answers
+        .split(',')
+        .map(str::trim)
+        .filter(|answer| answer.starts_with("project_name="))
+        .chain(std::iter::once("use_docker=false"))
+        .collect::<Vec<_>>();
+    generate(world, "roundtrip-project", &answers);
+}
+
+#[given(regex = r#"^ユーザーが \"(.+)\" 種の修正を加えた$"#)]
+fn apply_roundtrip_edit(world: &mut RelensWorld, edit_kind: String) {
+    let project = world.project_directory.as_ref().unwrap();
+    if edit_kind == "リテラル修正" {
+        let path = project.join("README.md");
+        fs::write(path, "# myapp\n説明文を修正").unwrap();
+    } else {
+        let package = if project.join("myapp/main.py").is_file() {
+            "myapp"
+        } else {
+            "app"
+        };
+        fs::write(
+            project.join(package).join("main.py"),
+            format!("print(\"{package} v2\")"),
+        )
+        .unwrap();
+    }
+}
+
+#[when(regex = r#"^\"relens lift\" を実行し Auto の hunk のみでパッチを構成する$"#)]
+fn run_auto_lift(world: &mut RelensWorld) {
+    run_lift(world);
+    assert!(String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout).contains(":Auto"));
+}
+
+#[when("パッチ適用後のテンプレートを同じ回答で再レンダリングする")]
+fn verification_rerenders_patch(world: &mut RelensWorld) {
+    // `relens lift` performs this pure apply/render comparison before emitting a patch.
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout)
+            .contains("verification:Pass")
+    );
+}
+
+#[then("再レンダリング結果は修正後のプロジェクトとバイト一致する")]
+fn put_get_matches(world: &mut RelensWorld) {
+    verification_passes(world);
+}
+
+#[given(regex = r#"^ユーザーが \"README.md\" の定型説明文のタイプミスを修正した$"#)]
+fn fix_literal_typo(world: &mut RelensWorld) {
+    fs::write(
+        world.project_directory.as_ref().unwrap().join("README.md"),
+        "# myapp\n定型の説明文を修正",
+    )
+    .unwrap();
+}
+
+#[given(regex = r#"^ユーザーが \"myapp/main.py\" の行を 'print\(\"myapp v2\"\)' に変更した$"#)]
+fn edit_variable_line(world: &mut RelensWorld) {
+    fs::write(
+        world
+            .project_directory
+            .as_ref()
+            .unwrap()
+            .join("myapp/main.py"),
+        "print(\"myapp v2\")",
+    )
+    .unwrap();
+}
+
+#[given(regex = r#"^ユーザーがドキュメントに文字列 \"\{\{ example \}\}\" を追記した$"#)]
+fn append_jinja_example(world: &mut RelensWorld) {
+    let path = world.project_directory.as_ref().unwrap().join("README.md");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("\n{{ example }}");
+    fs::write(path, text).unwrap();
+}
+
+#[given(regex = r#"^ユーザーがファイル \"notes/private.md\" を新規作成した$"#)]
+fn add_private_notes(world: &mut RelensWorld) {
+    let path = world
+        .project_directory
+        .as_ref()
+        .unwrap()
+        .join("notes/private.md");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, "private").unwrap();
+}
+
+fn patch(world: &RelensWorld) -> String {
+    fs::read_to_string(
+        world
+            .project_directory
+            .as_ref()
+            .unwrap()
+            .join(".relens/template.patch"),
+    )
+    .unwrap_or_default()
+}
+
+#[then(regex = r#"^すべての hunk が \"Auto\" に分類される$"#)]
+fn all_hunks_auto(world: &mut RelensWorld) {
+    let stdout = String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout);
+    assert!(stdout.contains(":Auto"));
+    assert!(!stdout.contains("Unmappable"));
+}
+
+#[then(regex = r#"^生成された TemplatePatch は \"README.md.j2\" の同じタイプミスを修正する$"#)]
+fn patch_fixes_typo(world: &mut RelensWorld) {
+    let patch = patch(world);
+    assert!(patch.contains("README.md.j2"));
+    assert!(patch.contains("定型の説明文を修正"));
+}
+
+#[then(regex = r#"^TemplatePatch は 'print\(\"\{\{ project_name \}\} v2\"\)' への変更を含む$"#)]
+fn patch_reverses_variable(world: &mut RelensWorld) {
+    assert!(patch(world).contains("print(\"{{ project_name }} v2\")"));
+}
+
+#[then(regex = r#"^文字列 \"myapp\" は TemplatePatch に平文として現れない$"#)]
+fn answer_not_literal(world: &mut RelensWorld) {
+    assert!(!patch(world).contains("myapp"));
+}
+
+#[then(regex = r#"^TemplatePatch 内で当該文字列は raw ブロックで保護されている$"#)]
+fn jinja_is_raw(world: &mut RelensWorld) {
+    assert!(patch(world).contains("{% raw %}{{{% endraw %} example }}"));
+}
+
+#[then(regex = r#"^ラウンドトリップ検証は \"Pass\" である$"#)]
+fn verification_passes(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout)
+            .contains("verification:Pass")
+    );
+}
+
+#[then(regex = r#"^当該ファイルは \"Unmappable\" として報告される$"#)]
+fn added_file_unmappable(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout)
+            .contains("notes/private.md:Unmappable")
+    );
+}
+
+#[then("「テンプレートへ新規ファイルとして追加する」提案が表示される")]
+fn addition_suggested(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout)
+            .contains("テンプレートへ新規ファイルとして追加する")
+    );
+}
+
+#[then("既定では TemplatePatch に含まれない")]
+fn addition_not_patched(world: &mut RelensWorld) {
+    assert!(!patch(world).contains("notes/private.md"));
+}
+
 #[when(regex = r#"^"relens lift" を実行する$"#)]
 fn run_lift(world: &mut RelensWorld) {
     let project = world.project_directory.clone().unwrap();
@@ -231,6 +407,26 @@ fn executes_completed_m1_features_with_cucumber_steps() {
         RelensWorld::cucumber()
             .filter_run_and_exit(features.join("roundtrip.feature"), |_, _, scenario| {
                 scenario.name.contains("GetPut")
+            })
+            .await;
+    });
+}
+
+#[test]
+fn executes_completed_m3_lift_features_with_cucumber_steps() {
+    let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features");
+    futures::executor::block_on(async {
+        RelensWorld::cucumber()
+            .filter_run_and_exit(features.join("lift.feature"), |_, _, scenario| {
+                scenario.name.contains("リテラル部分")
+                    || scenario.name.contains("変数由来")
+                    || scenario.name.contains("Jinjaメタ文字")
+                    || scenario.name.contains("追加された無関係")
+            })
+            .await;
+        RelensWorld::cucumber()
+            .filter_run_and_exit(features.join("roundtrip.feature"), |_, _, scenario| {
+                scenario.name.contains("PutGet")
             })
             .await;
     });

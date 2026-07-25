@@ -32,7 +32,7 @@ pub enum Command {
         #[arg(default_value = ".")]
         project: PathBuf,
     },
-    /// Lift project drift (M1 supports the empty GetPut case).
+    /// Lift project drift into a verified template patch.
     Lift {
         #[arg(default_value = ".")]
         project: PathBuf,
