@@ -345,53 +345,78 @@ pub fn pairwise_answers(
     if dimensions.is_empty() {
         return Ok(vec![BTreeMap::new()]);
     }
-    let mut candidates = vec![BTreeMap::new()];
-    for (name, values) in &dimensions {
-        candidates = candidates
-            .into_iter()
-            .flat_map(|row| {
-                values.iter().cloned().map(move |value| {
-                    let mut row = row.clone();
-                    row.insert(name.clone(), value);
-                    row
-                })
-            })
-            .collect();
-    }
     if dimensions.len() == 1 {
-        return Ok(candidates);
+        return Ok(dimensions[0]
+            .1
+            .iter()
+            .cloned()
+            .map(|value| BTreeMap::from([(dimensions[0].0.clone(), value)]))
+            .collect());
     }
-    let mut uncovered = std::collections::BTreeSet::new();
-    for left in 0..dimensions.len() {
-        for right in left + 1..dimensions.len() {
-            for a in &dimensions[left].1 {
-                for b in &dimensions[right].1 {
-                    uncovered.insert((
-                        dimensions[left].0.clone(),
-                        a.display(),
-                        dimensions[right].0.clone(),
-                        b.display(),
-                    ));
-                }
-            }
+
+    // Start with the first pair (all of these combinations are required), then
+    // extend the covering array one dimension at a time. This keeps both work
+    // and storage proportional to the required pair coverage rather than to
+    // the Cartesian product of every question.
+    let mut rows = Vec::new();
+    for left in &dimensions[0].1 {
+        for right in &dimensions[1].1 {
+            rows.push(BTreeMap::from([
+                (dimensions[0].0.clone(), left.clone()),
+                (dimensions[1].0.clone(), right.clone()),
+            ]));
         }
     }
-    let mut selected = Vec::new();
-    while !uncovered.is_empty() {
-        let (index, _) = candidates
-            .iter()
-            .enumerate()
-            .map(|(i, row)| (i, covered_pairs(row, &uncovered)))
-            .max_by_key(|(i, count)| (*count, std::cmp::Reverse(*i)))
-            .unwrap();
-        let row = candidates.remove(index);
-        uncovered.retain(|pair| !row_covers(&row, pair));
-        selected.push(row);
+    for current in 2..dimensions.len() {
+        let (name, values) = &dimensions[current];
+        let mut uncovered = pairs_for_dimension(&dimensions, current);
+        for row in &mut rows {
+            let value = values
+                .iter()
+                .max_by_key(|value| {
+                    dimensions[..current]
+                        .iter()
+                        .filter(|(previous, _)| {
+                            let pair = (
+                                previous.clone(),
+                                row[previous].display(),
+                                name.clone(),
+                                value.display(),
+                            );
+                            uncovered.contains(&pair)
+                        })
+                        .count()
+                })
+                .expect("finite dimensions are non-empty")
+                .clone();
+            row.insert(name.clone(), value);
+            uncovered.retain(|pair| !row_covers(row, pair));
+        }
+        while let Some(pair) = uncovered.iter().next().cloned() {
+            let mut row = dimensions[..current]
+                .iter()
+                .map(|(previous, choices)| (previous.clone(), choices[0].clone()))
+                .collect::<BTreeMap<_, _>>();
+            let new_value = values
+                .iter()
+                .find(|value| value.display() == pair.3)
+                .expect("pair value belongs to dimension")
+                .clone();
+            row.insert(
+                pair.0.clone(),
+                dimensions[..current]
+                    .iter()
+                    .find(|(previous, _)| previous == &pair.0)
+                    .and_then(|(_, choices)| choices.iter().find(|value| value.display() == pair.1))
+                    .expect("pair value belongs to dimension")
+                    .clone(),
+            );
+            row.insert(name.clone(), new_value);
+            uncovered.retain(|candidate| !row_covers(&row, candidate));
+            rows.push(row);
+        }
     }
-    if selected.is_empty() {
-        selected.push(candidates.remove(0));
-    }
-    Ok(selected)
+    Ok(rows)
 }
 
 type Pair = (String, String, String, String);
@@ -399,11 +424,24 @@ fn row_covers(row: &BTreeMap<String, AnswerValue>, pair: &Pair) -> bool {
     row.get(&pair.0).is_some_and(|v| v.display() == pair.1)
         && row.get(&pair.2).is_some_and(|v| v.display() == pair.3)
 }
-fn covered_pairs(
-    row: &BTreeMap<String, AnswerValue>,
-    pairs: &std::collections::BTreeSet<Pair>,
-) -> usize {
-    pairs.iter().filter(|p| row_covers(row, p)).count()
+fn pairs_for_dimension(
+    dimensions: &[(String, Vec<AnswerValue>)],
+    current: usize,
+) -> std::collections::BTreeSet<Pair> {
+    let mut pairs = std::collections::BTreeSet::new();
+    for (previous, previous_values) in &dimensions[..current] {
+        for left in previous_values {
+            for right in &dimensions[current].1 {
+                pairs.insert((
+                    previous.clone(),
+                    left.display(),
+                    dimensions[current].0.clone(),
+                    right.display(),
+                ));
+            }
+        }
+    }
+    pairs
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -596,6 +634,28 @@ mod matrix_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn pairwise_plan_scales_to_many_boolean_questions() {
+        let questionnaire = Questionnaire {
+            questions: (0..25)
+                .map(|index| {
+                    (
+                        format!("q{index:02}"),
+                        Question {
+                            kind: QuestionKind::Bool,
+                            default: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+
+        let rows = pairwise_answers(&questionnaire).unwrap();
+
+        assert!(rows.len() < 100);
+        assert!(rows.iter().all(|row| row.len() == 25));
     }
 
     #[test]
