@@ -892,6 +892,7 @@ dependencies = [
  "relens-vcs",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.19",
  "tracing",
  "tracing-subscriber",
 ]
@@ -938,6 +939,7 @@ name = "relens-vcs"
 version = "0.1.0"
 dependencies = [
  "relens-domain",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

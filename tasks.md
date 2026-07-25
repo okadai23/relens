@@ -38,11 +38,14 @@
 
 ## M2 — update
 
-- [ ] **[TODO] `update.feature`: ドリフトのないプロジェクトへの更新**
-- [ ] **[TODO] `update.feature`: 衝突しないローカル修正の自動マージ**
-- [ ] **[TODO] `update.feature`: 同一行の衝突と conflict marker の報告**
-- [ ] **[TODO] TemplateSource と git adapter を実装する**
-- [ ] **[TODO] pristine/base/project の 3-way merge を unit test する**
+- [x] **[DONE] `update.feature`: ドリフトのないプロジェクトへの更新**
+- [x] **[DONE] `update.feature`: 衝突しないローカル修正の自動マージ**
+- [x] **[DONE] `update.feature`: 同一行の衝突と conflict marker の報告**
+- [x] **[DONE] TemplateSource と git adapter を実装する**
+- [x] **[DONE] pristine/base/project の 3-way merge を unit test する**
+  - 記録済み commit とテンプレート HEAD を Git adapter で取得し、回答を再利用して双方を render する `relens update` を追加。
+  - 片側変更と非重複行変更を自動統合し、競合時は marker を書き込んで衝突ファイルを stdout に報告。
+  - engine unit test と `cargo test -p relens-cli --test features` の M2 受け入れシナリオで検証。
 
 ## M3 — Auto lift と verify
 

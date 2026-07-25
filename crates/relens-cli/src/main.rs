@@ -6,7 +6,11 @@ use tracing_subscriber::EnvFilter;
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose, cli.quiet);
-    let result = commands::execute(cli.command)?;
+    let result = commands::execute(cli.command).inspect_err(|error| {
+        if let Some(conflict) = error.downcast_ref::<commands::UpdateConflict>() {
+            println!("conflicts: {}", conflict.files.join(","));
+        }
+    })?;
     if !cli.quiet {
         println!("{}", output::render(&result, cli.output)?);
     }

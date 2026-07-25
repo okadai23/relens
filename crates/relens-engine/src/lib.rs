@@ -303,6 +303,89 @@ fn append(out: &mut Vec<u8>, spans: &mut Vec<SourceSpan>, child: RenderedText) {
     }));
 }
 
+/// Merge a pristine render, a user's project file, and a newly rendered file.
+/// Equal sides are resolved without markers; competing edits are made explicit.
+pub fn three_way_merge(base: &[u8], project: &[u8], updated: &[u8]) -> MergeResult {
+    if project == base || project == updated {
+        return MergeResult::Merged(updated.to_vec());
+    }
+    if updated == base {
+        return MergeResult::Merged(project.to_vec());
+    }
+    if let (Ok(base), Ok(project), Ok(updated)) = (
+        std::str::from_utf8(base),
+        std::str::from_utf8(project),
+        std::str::from_utf8(updated),
+    ) {
+        let base_lines = base.split_inclusive('\n').collect::<Vec<_>>();
+        let local_edit = single_edit(
+            &base_lines,
+            &project.split_inclusive('\n').collect::<Vec<_>>(),
+        );
+        let template_edit = single_edit(
+            &base_lines,
+            &updated.split_inclusive('\n').collect::<Vec<_>>(),
+        );
+        let same_insertion = local_edit.start == local_edit.end
+            && template_edit.start == template_edit.end
+            && local_edit.start == template_edit.start;
+        if !same_insertion
+            && (local_edit.end <= template_edit.start || template_edit.end <= local_edit.start)
+        {
+            let mut lines = base_lines;
+            let mut edits = [local_edit, template_edit];
+            // Apply edits from the end of the base towards the beginning so their
+            // coordinates remain valid. At an equal start, apply a replacement
+            // before an insertion: the insertion is then placed in front of the
+            // replacement instead of being overwritten by it.
+            edits.sort_by_key(|edit| std::cmp::Reverse((edit.start, edit.end)));
+            for edit in edits {
+                lines.splice(edit.start..edit.end, edit.replacement);
+            }
+            return MergeResult::Merged(lines.concat().into_bytes());
+        }
+    }
+    let mut marked = b"<<<<<<< project\n".to_vec();
+    marked.extend_from_slice(project);
+    if !project.ends_with(b"\n") {
+        marked.push(b'\n');
+    }
+    marked.extend_from_slice(b"=======\n");
+    marked.extend_from_slice(updated);
+    if !updated.ends_with(b"\n") {
+        marked.push(b'\n');
+    }
+    marked.extend_from_slice(b">>>>>>> template\n");
+    MergeResult::Conflict(marked)
+}
+
+struct LineEdit<'a> {
+    start: usize,
+    end: usize,
+    replacement: Vec<&'a str>,
+}
+
+fn single_edit<'a>(base: &[&str], changed: &[&'a str]) -> LineEdit<'a> {
+    let prefix = base.iter().zip(changed).take_while(|(a, b)| a == b).count();
+    let suffix = base[prefix..]
+        .iter()
+        .rev()
+        .zip(changed[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    LineEdit {
+        start: prefix,
+        end: base.len() - suffix,
+        replacement: changed[prefix..changed.len() - suffix].to_vec(),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MergeResult {
+    Merged(Vec<u8>),
+    Conflict(Vec<u8>),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +455,43 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported")
+        );
+    }
+
+    #[test]
+    fn three_way_merge_preserves_the_only_changed_side() {
+        assert_eq!(
+            three_way_merge(b"base", b"local", b"base"),
+            MergeResult::Merged(b"local".to_vec())
+        );
+        assert_eq!(
+            three_way_merge(b"base", b"base", b"new"),
+            MergeResult::Merged(b"new".to_vec())
+        );
+    }
+
+    #[test]
+    fn three_way_merge_marks_competing_changes() {
+        let MergeResult::Conflict(bytes) = three_way_merge(b"old\n", b"local\n", b"new\n") else {
+            panic!("expected conflict")
+        };
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("<<<<<<< project\nlocal\n=======\nnew\n>>>>>>> template"));
+    }
+
+    #[test]
+    fn three_way_merge_combines_disjoint_edits_in_one_file() {
+        assert_eq!(
+            three_way_merge(b"one\ntwo\n", b"one\ntwo\nlocal\n", b"ONE\ntwo\n"),
+            MergeResult::Merged(b"ONE\ntwo\nlocal\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn three_way_merge_keeps_an_insertion_before_a_replaced_line() {
+        assert_eq!(
+            three_way_merge(b"a\n", b"x\na\n", b"A\n"),
+            MergeResult::Merged(b"x\nA\n".to_vec())
         );
     }
 }

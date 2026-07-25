@@ -37,6 +37,11 @@ pub enum Command {
         #[arg(default_value = ".")]
         project: PathBuf,
     },
+    /// Update a generated project to the template repository's HEAD.
+    Update {
+        #[arg(default_value = ".")]
+        project: PathBuf,
+    },
     /// Create a starter configuration file.
     Init {
         #[arg(default_value = "relens.toml")]
