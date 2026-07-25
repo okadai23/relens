@@ -30,7 +30,13 @@ workspace の `relens-cli` は次のコマンドを提供します。
 ```console
 cargo run -- init
 cargo run -- run --output json
+cargo run -- matrix path/to/template
+cargo run -- matrix path/to/template --plan
 ```
+
+有限選択肢は `relens.toml` で `type = "choice"` と `choices = ["a", "b"]` を指定します。
+`update` 時の回答移行は `migrations/*.json` をファイル名順に検出し、`rename`、`set`、
+`remove` を宣言できます。移行の解析または適用に失敗した場合、プロジェクトは更新されません。
 
 処理結果は stdout、診断とエラーは stderr に出力します。`--quiet`、`--verbose`、
 `--color auto|always|never` を全サブコマンドで利用できます。

@@ -22,6 +22,30 @@ pub enum GitError {
 #[derive(Debug, Default)]
 pub struct GitTemplateSource;
 
+pub fn read_worktree(repository: &Path) -> Result<TemplateTree, GitError> {
+    let mut tree = TemplateTree::new();
+    for entry in walkdir::WalkDir::new(repository)
+        .into_iter()
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let relative = entry
+            .path()
+            .strip_prefix(repository)
+            .map_err(|_| GitError::Path)?;
+        let path = relative.to_str().ok_or(GitError::Path)?.replace('\\', "/");
+        tree.insert(
+            path,
+            fs::read(entry.path()).map_err(|error| GitError::Command {
+                repository: repository.display().to_string(),
+                message: error.to_string(),
+            })?,
+        );
+    }
+    Ok(tree)
+}
+
 impl GitTemplateSource {
     fn git(repository: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
         let output = Command::new("git")

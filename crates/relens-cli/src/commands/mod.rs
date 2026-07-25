@@ -25,6 +25,7 @@ pub fn execute(command: Command) -> Result<CommandResult> {
             export,
         } => lift(&project, resume, export, &decisions),
         Command::Update { project } => update(&project),
+        Command::Matrix { template, plan } => matrix(&template, plan),
         Command::Init { path } => {
             relens_store::initialize(&path).context("failed to initialize relens")
         }
@@ -50,7 +51,7 @@ fn render_tree(
 ) -> Result<BTreeMap<String, (Vec<u8>, relens_domain::SourceMap)>> {
     let mut rendered = BTreeMap::new();
     for (path, bytes) in tree {
-        if path == "relens.toml" {
+        if path == "relens.toml" || path == "matrix.toml" || path.starts_with("migrations/") {
             continue;
         }
         let source =
@@ -72,6 +73,48 @@ fn render_tree(
     Ok(rendered)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("matrix rendering failed: {failures}")]
+pub struct MatrixFailure {
+    pub failures: String,
+}
+
+fn matrix(template: &Path, plan: bool) -> Result<CommandResult> {
+    let questionnaire =
+        relens_store::load_questionnaire(template).context("failed to load questionnaire")?;
+    let rows = relens_domain::pairwise_answers(&questionnaire)
+        .context("failed to generate pairwise matrix")?;
+    if plan {
+        return Ok(CommandResult::new(
+            "matrix-plan",
+            serde_json::to_string(&rows)?,
+        ));
+    }
+    let tree = relens_vcs::read_worktree(template).context("failed to read template")?;
+    let failures = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, answers)| {
+            render_tree(&tree, answers).err().map(|error| {
+                format!(
+                    "case {index} {}: {error:#}",
+                    serde_json::to_string(answers).unwrap_or_default()
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        return Err(MatrixFailure {
+            failures: failures.join("; "),
+        }
+        .into());
+    }
+    Ok(CommandResult::new(
+        "matrix",
+        format!("{} combinations passed", rows.len()),
+    ))
+}
+
 fn update(project: &Path) -> Result<CommandResult> {
     let mut answers =
         relens_store::load_answers(project).context("failed to load project answers")?;
@@ -85,6 +128,7 @@ fn update(project: &Path) -> Result<CommandResult> {
     let new_tree = source
         .fetch(&latest)
         .context("failed to fetch latest template")?;
+    answers.answers = apply_migrations(&new_tree, &answers.answers)?;
     let base = render_tree(&old_tree, &answers.answers)?;
     let updated = render_tree(&new_tree, &answers.answers)?;
     let paths = base
@@ -144,6 +188,24 @@ fn update(project: &Path) -> Result<CommandResult> {
     relens_store::persist(project, &answers, &merged_metadata)
         .context("failed to persist updated metadata")?;
     Ok(CommandResult::new("updated", project.display().to_string()))
+}
+
+fn apply_migrations(
+    tree: &TemplateTree,
+    answers: &BTreeMap<String, AnswerValue>,
+) -> Result<BTreeMap<String, AnswerValue>> {
+    let mut migrated = answers.clone();
+    for (path, bytes) in tree
+        .iter()
+        .filter(|(path, _)| path.starts_with("migrations/") && path.ends_with(".json"))
+    {
+        let migration: relens_domain::Migration =
+            serde_json::from_slice(bytes).with_context(|| format!("invalid migration {path}"))?;
+        migrated = migration
+            .apply(&migrated)
+            .with_context(|| format!("migration {path} failed"))?;
+    }
+    Ok(migrated)
 }
 
 fn reject_symlinked_path(project: &Path, relative: &Path) -> Result<()> {

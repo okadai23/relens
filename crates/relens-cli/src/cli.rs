@@ -51,6 +51,14 @@ pub enum Command {
         #[arg(default_value = ".")]
         project: PathBuf,
     },
+    /// Render a pairwise answer matrix and report every invalid combination.
+    Matrix {
+        #[arg(default_value = ".")]
+        template: PathBuf,
+        /// Print the generated answer plan without rendering it.
+        #[arg(long)]
+        plan: bool,
+    },
     /// Create a starter configuration file.
     Init {
         #[arg(default_value = "relens.toml")]

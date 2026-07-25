@@ -35,6 +35,8 @@ struct RawQuestion {
     #[serde(rename = "type")]
     kind: String,
     default: Option<toml::Value>,
+    #[serde(default)]
+    choices: Vec<String>,
 }
 pub fn load_questionnaire(template: &Path) -> Result<Questionnaire, RelensError> {
     let path = template.join("relens.toml");
@@ -48,6 +50,7 @@ pub fn load_questionnaire(template: &Path) -> Result<Questionnaire, RelensError>
                 "string" | "Str" => QuestionKind::String,
                 "bool" | "Bool" => QuestionKind::Bool,
                 "integer" | "Int" => QuestionKind::Integer,
+                "choice" | "Choice" if !q.choices.is_empty() => QuestionKind::Choice(q.choices),
                 _ => {
                     return Err(RelensError::Validation {
                         kind: "questionnaire",

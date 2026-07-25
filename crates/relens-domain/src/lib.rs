@@ -190,11 +190,77 @@ pub trait TemplateSource {
     fn latest(&self, locator: &str) -> Result<TemplateRef, Self::Error>;
 }
 
+/// Optional extension point for producing lift candidates. Suggestions are
+/// deliberately unverified; callers must always pass them through the normal
+/// lift verification gate before they can be exported.
+pub trait LiftSuggester {
+    type Error: std::error::Error + Send + Sync + 'static;
+    fn suggest(
+        &self,
+        request: &LiftSuggestionRequest,
+    ) -> Result<Vec<TemplateSuggestion>, Self::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiftSuggestionRequest {
+    pub template: TemplateTree,
+    pub project: TemplateTree,
+    pub answers: BTreeMap<String, AnswerValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateSuggestion {
+    pub path: String,
+    pub content: Vec<u8>,
+}
+
+/// Declarative, side-effect-free answer migration. Applying a migration is
+/// atomic because validation is performed on a cloned answer map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Migration {
+    #[serde(default)]
+    pub rename: BTreeMap<String, String>,
+    #[serde(default)]
+    pub set: BTreeMap<String, AnswerValue>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+impl Migration {
+    pub fn apply(
+        &self,
+        answers: &BTreeMap<String, AnswerValue>,
+    ) -> Result<BTreeMap<String, AnswerValue>, RelensError> {
+        let mut migrated = answers.clone();
+        for (from, to) in &self.rename {
+            if migrated.contains_key(to) {
+                return Err(RelensError::Validation {
+                    kind: "migration",
+                    message: format!("cannot rename `{from}` to existing answer `{to}`"),
+                });
+            }
+            let value = migrated
+                .remove(from)
+                .ok_or_else(|| RelensError::Validation {
+                    kind: "migration",
+                    message: format!("answer `{from}` does not exist"),
+                })?;
+            migrated.insert(to.clone(), value);
+        }
+        for name in &self.remove {
+            migrated.remove(name);
+        }
+        migrated.extend(self.set.clone());
+        Ok(migrated)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuestionKind {
     String,
     Bool,
     Integer,
+    Choice(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,12 +289,15 @@ impl Questionnaire {
                     kind: "answers",
                     message: format!("missing answer `{name}`"),
                 })?;
-            let valid = matches!(
-                (&question.kind, &value),
+            let valid = match (&question.kind, &value) {
                 (QuestionKind::String, AnswerValue::String(_))
-                    | (QuestionKind::Bool, AnswerValue::Bool(_))
-                    | (QuestionKind::Integer, AnswerValue::Integer(_))
-            );
+                | (QuestionKind::Bool, AnswerValue::Bool(_))
+                | (QuestionKind::Integer, AnswerValue::Integer(_)) => true,
+                (QuestionKind::Choice(options), AnswerValue::String(value)) => {
+                    options.contains(value)
+                }
+                _ => false,
+            };
             if !valid {
                 return Err(RelensError::Validation {
                     kind: "answers",
@@ -248,6 +317,93 @@ impl Questionnaire {
         }
         Ok(result)
     }
+}
+
+/// Generates a deterministic greedy pairwise covering array.
+pub fn pairwise_answers(
+    questionnaire: &Questionnaire,
+) -> Result<Vec<BTreeMap<String, AnswerValue>>, RelensError> {
+    let dimensions = questionnaire
+        .questions
+        .iter()
+        .map(|(name, question)| {
+            let values = match &question.kind {
+                QuestionKind::Bool => vec![AnswerValue::Bool(false), AnswerValue::Bool(true)],
+                QuestionKind::Choice(values) if !values.is_empty() => {
+                    values.iter().cloned().map(AnswerValue::String).collect()
+                }
+                _ => question.default.clone().map(|v| vec![v]).ok_or_else(|| {
+                    RelensError::Validation {
+                        kind: "matrix",
+                        message: format!("question `{name}` needs a finite choice set or default"),
+                    }
+                })?,
+            };
+            Ok((name.clone(), values))
+        })
+        .collect::<Result<Vec<_>, RelensError>>()?;
+    if dimensions.is_empty() {
+        return Ok(vec![BTreeMap::new()]);
+    }
+    let mut candidates = vec![BTreeMap::new()];
+    for (name, values) in &dimensions {
+        candidates = candidates
+            .into_iter()
+            .flat_map(|row| {
+                values.iter().cloned().map(move |value| {
+                    let mut row = row.clone();
+                    row.insert(name.clone(), value);
+                    row
+                })
+            })
+            .collect();
+    }
+    if dimensions.len() == 1 {
+        return Ok(candidates);
+    }
+    let mut uncovered = std::collections::BTreeSet::new();
+    for left in 0..dimensions.len() {
+        for right in left + 1..dimensions.len() {
+            for a in &dimensions[left].1 {
+                for b in &dimensions[right].1 {
+                    uncovered.insert((
+                        dimensions[left].0.clone(),
+                        a.display(),
+                        dimensions[right].0.clone(),
+                        b.display(),
+                    ));
+                }
+            }
+        }
+    }
+    let mut selected = Vec::new();
+    while !uncovered.is_empty() {
+        let (index, _) = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, row)| (i, covered_pairs(row, &uncovered)))
+            .max_by_key(|(i, count)| (*count, std::cmp::Reverse(*i)))
+            .unwrap();
+        let row = candidates.remove(index);
+        uncovered.retain(|pair| !row_covers(&row, pair));
+        selected.push(row);
+    }
+    if selected.is_empty() {
+        selected.push(candidates.remove(0));
+    }
+    Ok(selected)
+}
+
+type Pair = (String, String, String, String);
+fn row_covers(row: &BTreeMap<String, AnswerValue>, pair: &Pair) -> bool {
+    row.get(&pair.0).is_some_and(|v| v.display() == pair.1)
+        && row.get(&pair.2).is_some_and(|v| v.display() == pair.3)
+}
+fn covered_pairs(
+    row: &BTreeMap<String, AnswerValue>,
+    pairs: &std::collections::BTreeSet<Pair>,
+) -> usize {
+    pairs.iter().filter(|p| row_covers(row, p)).count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,5 +534,101 @@ mod tests {
         assert_eq!(session.state, LiftSessionState::Verified);
         session.export().unwrap();
         assert_eq!(session.state, LiftSessionState::Exported);
+    }
+}
+
+#[cfg(test)]
+mod matrix_tests {
+    use super::*;
+
+    #[test]
+    fn pairwise_plan_covers_every_value_pair_without_full_product() {
+        let questionnaire = Questionnaire {
+            questions: BTreeMap::from([
+                (
+                    "a".into(),
+                    Question {
+                        kind: QuestionKind::Bool,
+                        default: None,
+                    },
+                ),
+                (
+                    "b".into(),
+                    Question {
+                        kind: QuestionKind::Bool,
+                        default: None,
+                    },
+                ),
+                (
+                    "c".into(),
+                    Question {
+                        kind: QuestionKind::Bool,
+                        default: None,
+                    },
+                ),
+                (
+                    "flavor".into(),
+                    Question {
+                        kind: QuestionKind::Choice(vec!["x".into(), "y".into(), "z".into()]),
+                        default: None,
+                    },
+                ),
+            ]),
+        };
+        let rows = pairwise_answers(&questionnaire).unwrap();
+        assert!(rows.len() < 24);
+        let dimensions = [
+            ("a", vec!["false", "true"]),
+            ("b", vec!["false", "true"]),
+            ("c", vec!["false", "true"]),
+            ("flavor", vec!["x", "y", "z"]),
+        ];
+        for left in 0..dimensions.len() {
+            for right in left + 1..dimensions.len() {
+                for a in &dimensions[left].1 {
+                    for b in &dimensions[right].1 {
+                        assert!(
+                            rows.iter()
+                                .any(|row| row[dimensions[left].0].display() == *a
+                                    && row[dimensions[right].0].display() == *b)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn choice_validation_rejects_values_outside_options() {
+        let q = Questionnaire {
+            questions: BTreeMap::from([(
+                "color".into(),
+                Question {
+                    kind: QuestionKind::Choice(vec!["red".into()]),
+                    default: None,
+                },
+            )]),
+        };
+        assert!(
+            q.validate(&BTreeMap::from([(
+                "color".into(),
+                AnswerValue::String("blue".into())
+            )]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_migration_leaves_original_answers_unchanged() {
+        let answers = BTreeMap::from([
+            ("old".into(), AnswerValue::String("value".into())),
+            ("new".into(), AnswerValue::String("existing".into())),
+        ]);
+        let migration = Migration {
+            rename: BTreeMap::from([("old".into(), "new".into())]),
+            ..Migration::default()
+        };
+        assert!(migration.apply(&answers).is_err());
+        assert_eq!(answers["old"], AnswerValue::String("value".into()));
     }
 }

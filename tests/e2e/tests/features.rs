@@ -97,6 +97,86 @@ fn exit_is_failure(world: &mut RelensWorld) {
     assert_ne!(world.last_cli.as_ref().unwrap().status, 0);
 }
 
+#[given(
+    regex = r#"^\"use_docker=false\" のプロジェクトからの lift で \"Dockerfile.j2\" の if 分岐内が壊れた$"#
+)]
+fn broken_unmaterialized_branch(world: &mut RelensWorld) {
+    let template = world.git_fixture("matrix").to_path_buf();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.use_docker]\ntype='bool'\ndefault=false\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("Dockerfile.j2"),
+        "{% if use_docker %}{{ missing | unsupported }}{% endif %}",
+    )
+    .unwrap();
+    world.template_repository = Some(template);
+}
+
+#[given(regex = r#"^当該 lift のラウンドトリップ検証は \"Pass\" だった$"#)]
+fn single_answer_lift_passed(_: &mut RelensWorld) {}
+
+#[given("Questionnaire に Bool 変数が 3 つ、Choice(3択) 変数が 1 つある")]
+fn pairwise_questionnaire(world: &mut RelensWorld) {
+    let template = world.git_fixture("matrix-plan").to_path_buf();
+    fs::write(template.join("relens.toml"), "[questions.a]\ntype='bool'\n[questions.b]\ntype='bool'\n[questions.c]\ntype='bool'\n[questions.flavor]\ntype='choice'\nchoices=['x','y','z']\n").unwrap();
+    world.template_repository = Some(template);
+}
+
+#[when(regex = r#"^テンプレートリポジトリで \"relens matrix\" を実行する$"#)]
+fn run_matrix(world: &mut RelensWorld) {
+    let template = world.template_repository.clone().unwrap();
+    world.run_cli(&["matrix", template.to_str().unwrap()]);
+}
+
+#[when(regex = r#"^\"relens matrix --plan\" を実行する$"#)]
+fn run_matrix_plan(world: &mut RelensWorld) {
+    let template = world.template_repository.clone().unwrap();
+    world.run_cli(&["matrix", template.to_str().unwrap(), "--plan"]);
+}
+
+#[then(regex = r#"^\"use_docker=true\" を含む組み合わせのレンダリングが失敗として報告される$"#)]
+fn true_branch_failure_reported(world: &mut RelensWorld) {
+    assert!(
+        String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stderr).contains("use_docker")
+    );
+}
+
+fn matrix_plan(world: &RelensWorld) -> Vec<serde_json::Value> {
+    let stdout = String::from_utf8(world.last_cli.as_ref().unwrap().stdout.clone()).unwrap();
+    serde_json::from_str(stdout.trim().strip_prefix("matrix-plan ").unwrap()).unwrap()
+}
+
+#[then("生成される組み合わせ数は全数 24 より少ない")]
+fn plan_is_smaller_than_product(world: &mut RelensWorld) {
+    assert!(matrix_plan(world).len() < 24);
+}
+
+#[then("任意の 2 変数の値ペアがいずれかの組み合わせに含まれている")]
+fn plan_covers_pairs(world: &mut RelensWorld) {
+    let rows = matrix_plan(world);
+    let values = [
+        ("a", vec!["false", "true"]),
+        ("b", vec!["false", "true"]),
+        ("c", vec!["false", "true"]),
+        ("flavor", vec!["x", "y", "z"]),
+    ];
+    for left in 0..values.len() {
+        for right in left + 1..values.len() {
+            for a in &values[left].1 {
+                for b in &values[right].1 {
+                    assert!(rows.iter().any(
+                        |row| row[values[left].0].to_string().trim_matches('"') == *a
+                            && row[values[right].0].to_string().trim_matches('"') == *b
+                    ));
+                }
+            }
+        }
+    }
+}
+
 #[then(regex = r##"^ファイル "README.md" の内容は "# myapp" で始まる$"##)]
 fn readme_starts_correctly(world: &mut RelensWorld) {
     assert!(
@@ -660,6 +740,12 @@ fn executes_completed_m4_lift_features_with_cucumber_steps() {
             })
             .await;
     });
+}
+
+#[test]
+fn executes_m5_matrix_features_with_cucumber_steps() {
+    let feature = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features/matrix.feature");
+    futures::executor::block_on(async { RelensWorld::cucumber().run_and_exit(feature).await });
 }
 
 #[derive(Debug)]
