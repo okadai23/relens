@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use relens::{cli::Cli, commands, output};
+use relens_cli::{cli::Cli, commands, output};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {

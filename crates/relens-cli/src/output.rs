@@ -1,6 +1,7 @@
 use anyhow::Result;
+use relens_domain::CommandResult;
 
-use crate::{CommandResult, cli::OutputFormat};
+use crate::cli::OutputFormat;
 
 pub fn render(result: &CommandResult, format: OutputFormat) -> Result<String> {
     match format {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(author, version, about)]
+#[command(name = "relens", author, version, about)]
 pub struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Human, global = true)]
     pub output: OutputFormat,

@@ -9,12 +9,14 @@
   - `docs/design.md` に境界、モデル、不変条件、逆写像方式を記録。
   - `features/` に日本語 Gherkin の受け入れ条件を配置。
   - 現在のスキャフォールドに対する Rust 品質ゲートを実行。
-- [ ] **[TODO] Cargo workspace と crate 境界を導入する**
+- [x] **[DONE] Cargo workspace と crate 境界を導入する**
   - `domain`, `engine`, `lift`, `vcs`, `store`, `cli` を依存方向に従って分割する。
   - 現在の stdout/stderr、人間向け/JSON 出力の契約を維持する。
-- [ ] **[TODO] cucumber-rs E2E harness を導入する**
+  - `cargo test --workspace --all-features --locked` で crate unit test と CLI 契約を確認。
+- [x] **[DONE] cucumber-rs E2E harness を導入する**
   - `RelensWorld`、実 git fixture builder、CLI runner、ファイル木 assertion を用意する。
   - 日本語キーワードの全 feature を discovery できる smoke test を追加する。
+  - `tests/e2e/tests/features.rs` で cucumber-rs の World と Gherkin parser を検証。
 
 ## M1 — render、SourceMap、drift
 

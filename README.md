@@ -5,7 +5,7 @@ Rust 製 CLI です。テンプレートからの生成と更新だけでなく�
 修正を由来情報に基づいてテンプレートへ持ち上げ、再レンダリングによって検証します。
 
 > [!NOTE]
-> 現在は CLI の土台のみが実装済みです。目標アーキテクチャと振る舞いは
+> 現在は workspace と CLI/E2E の土台のみが実装済みです。目標アーキテクチャと振る舞いは
 > [`docs/design.md`](docs/design.md)、実装順序は [`tasks.md`](tasks.md)、受け入れ条件は
 > [`features/`](features/) を参照してください。
 
@@ -25,7 +25,7 @@ GetPut: lift(diff(render(t, a), render(t, a))) == empty_patch
 
 ## 現在利用できる開発用コマンド
 
-現在のスキャフォールドは次のコマンドを提供します。
+workspace の `relens-cli` は次のコマンドを提供します。
 
 ```console
 cargo run -- init
@@ -34,6 +34,9 @@ cargo run -- run --output json
 
 処理結果は stdout、診断とエラーは stderr に出力します。`--quiet`、`--verbose`、
 `--color auto|always|never` を全サブコマンドで利用できます。
+
+コードは `crates/relens-{domain,engine,lift,vcs,store,cli}` に分割し、受け入れテストの
+共通 fixture と日本語 feature discovery smoke test は `tests/e2e` に配置しています。
 
 ## 開発
 

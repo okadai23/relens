@@ -1,13 +1,24 @@
-[package]
-name = "relens"
+[workspace]
+members = [
+    "crates/relens-cli",
+    "crates/relens-domain",
+    "crates/relens-engine",
+    "crates/relens-lift",
+    "crates/relens-store",
+    "crates/relens-vcs",
+    "tests/e2e",
+]
+default-members = ["crates/relens-cli"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-description = "A maintainable command-line application scaffold"
 repository = "https://github.com/example/relens"
 
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -16,12 +27,6 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-[dev-dependencies]
-assert_cmd = "2"
-predicates = "3"
-tempfile = "3"
-
 [profile.release]
 lto = "thin"
 strip = true
-
