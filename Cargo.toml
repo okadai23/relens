@@ -6,7 +6,6 @@ members = [
     "crates/relens-lift",
     "crates/relens-store",
     "crates/relens-vcs",
-    "tests/e2e",
 ]
 default-members = ["crates/relens-cli"]
 resolver = "2"

@@ -10,13 +10,25 @@ use cucumber::World;
 use tempfile::TempDir;
 
 /// Scenario-isolated state for executable feature steps.
-#[derive(Debug, Default, World)]
+#[derive(Debug, World)]
 pub struct RelensWorld {
     root: Option<TempDir>,
     template_repository: Option<PathBuf>,
     project_directory: Option<PathBuf>,
     last_cli: Option<CliOutput>,
     session_id: Option<String>,
+}
+
+impl Default for RelensWorld {
+    fn default() -> Self {
+        Self {
+            root: Some(tempfile::tempdir().expect("temporary world")),
+            template_repository: None,
+            project_directory: None,
+            last_cli: None,
+            session_id: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -27,13 +39,6 @@ struct CliOutput {
 }
 
 impl RelensWorld {
-    fn fresh() -> Self {
-        Self {
-            root: Some(tempfile::tempdir().expect("temporary world")),
-            ..Self::default()
-        }
-    }
-
     fn git_fixture(&mut self, name: &str) -> &Path {
         let path = self.root.as_ref().expect("world root").path().join(name);
         fs::create_dir_all(&path).expect("create git fixture");
@@ -110,7 +115,7 @@ fn discovers_every_japanese_feature_with_the_cucumber_parser() {
 
 #[test]
 fn fixture_builder_and_cli_runner_are_ready_for_scenario_steps() {
-    let mut world = RelensWorld::fresh();
+    let mut world = RelensWorld::default();
     assert!(world.git_fixture("template").join(".git").is_dir());
     world.run_cli(&["--version"]);
     let output = world.last_cli.as_ref().unwrap();

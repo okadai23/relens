@@ -5,6 +5,10 @@
 
 ## 基盤
 
+- [x] **[DONE] Cucumber world と単独 E2E 実行を安定化する**
+  - `Default` でシナリオごとの一時 root を必ず初期化し、実シナリオでも fixture を利用可能にした。
+  - E2E test target を CLI package に接続し、`cargo test -p relens-cli --test features` 単独でも binary を確実に解決できるようにした。
+
 - [x] **[DONE] 設計と実行仕様をリポジトリへ記録する**
   - `docs/design.md` に境界、モデル、不変条件、逆写像方式を記録。
   - `features/` に日本語 Gherkin の受け入れ条件を配置。
