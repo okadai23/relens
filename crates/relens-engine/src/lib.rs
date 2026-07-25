@@ -233,7 +233,11 @@ pub fn three_way_merge(base: &[u8], project: &[u8], updated: &[u8]) -> MergeResu
         {
             let mut lines = base_lines;
             let mut edits = [local_edit, template_edit];
-            edits.sort_by_key(|edit| std::cmp::Reverse(edit.start));
+            // Apply edits from the end of the base towards the beginning so their
+            // coordinates remain valid. At an equal start, apply a replacement
+            // before an insertion: the insertion is then placed in front of the
+            // replacement instead of being overwritten by it.
+            edits.sort_by_key(|edit| std::cmp::Reverse((edit.start, edit.end)));
             for edit in edits {
                 lines.splice(edit.start..edit.end, edit.replacement);
             }
@@ -341,6 +345,14 @@ mod tests {
         assert_eq!(
             three_way_merge(b"one\ntwo\n", b"one\ntwo\nlocal\n", b"ONE\ntwo\n"),
             MergeResult::Merged(b"ONE\ntwo\nlocal\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn three_way_merge_keeps_an_insertion_before_a_replaced_line() {
+        assert_eq!(
+            three_way_merge(b"a\n", b"x\na\n", b"A\n"),
+            MergeResult::Merged(b"x\nA\n".to_vec())
         );
     }
 }
