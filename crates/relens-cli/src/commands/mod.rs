@@ -81,6 +81,11 @@ fn update(project: &Path) -> Result<CommandResult> {
         .chain(updated.keys())
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
+    // Check every target before changing any files so a malicious tree cannot
+    // leave the project partially updated before an unsafe path is discovered.
+    for path in &paths {
+        reject_symlinked_path(project, Path::new(path))?;
+    }
     let mut merged_metadata = BTreeMap::new();
     let mut conflicts = Vec::new();
     for path in paths {
@@ -128,6 +133,28 @@ fn update(project: &Path) -> Result<CommandResult> {
     relens_store::persist(project, &answers, &merged_metadata)
         .context("failed to persist updated metadata")?;
     Ok(CommandResult::new("updated", project.display().to_string()))
+}
+
+fn reject_symlinked_path(project: &Path, relative: &Path) -> Result<()> {
+    let mut candidate = project.to_path_buf();
+    for component in relative.components() {
+        candidate.push(component);
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!(
+                    "refusing to update through symbolic link: {}",
+                    candidate.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", candidate.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn new_project(
@@ -273,7 +300,7 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_tree, safe_relative_path};
+    use super::{reject_symlinked_path, render_tree, safe_relative_path};
     use relens_domain::{AnswerValue, TemplateTree};
     use std::{collections::BTreeMap, path::PathBuf};
 
@@ -308,5 +335,23 @@ mod tests {
                 "{escaping}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinks_in_update_targets() {
+        use std::{fs, os::unix::fs::symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join("output")).unwrap();
+
+        assert!(
+            reject_symlinked_path(&project, PathBuf::from("output/file.txt").as_path()).is_err()
+        );
+        assert!(reject_symlinked_path(&project, PathBuf::from("safe/file.txt").as_path()).is_ok());
     }
 }

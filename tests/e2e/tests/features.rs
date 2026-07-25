@@ -447,7 +447,7 @@ default = false
         .stdout(predicates::str::contains("no-patch"));
 }
 
-/// Executable cucumber-step coverage for the three M2 update scenarios.
+/// Executable cucumber-step coverage for the four M2 update scenarios.
 #[test]
 fn m2_update_scenarios() {
     let root = tempfile::tempdir().unwrap();
@@ -551,6 +551,54 @@ fn m2_update_scenarios() {
         fs::read_to_string(conflicting.join("README.md"))
             .unwrap()
             .contains("<<<<<<< project")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn update_rejects_a_path_through_a_symlinked_directory() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let template = root.path().join("python-lib");
+    fs::create_dir_all(&template).unwrap();
+    fs::write(template.join("relens.toml"), "[questions]\n").unwrap();
+    fs::write(template.join("README.md.j2"), "v1\n").unwrap();
+    git_commit(&template, "v1");
+
+    let project = root.path().join("project");
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args([
+            "new",
+            template.to_str().unwrap(),
+            "-d",
+            project.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let outside = root.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("file.txt"), "outside remains unchanged\n").unwrap();
+    symlink(&outside, project.join("output")).unwrap();
+    fs::create_dir(template.join("output")).unwrap();
+    fs::write(template.join("output/file.txt.j2"), "template update\n").unwrap();
+    git_commit(&template, "v2");
+
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["update", project.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("symbolic link"));
+    assert_eq!(
+        fs::read_to_string(outside.join("file.txt")).unwrap(),
+        "outside remains unchanged\n"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("README.md")).unwrap(),
+        "v1\n"
     );
 }
 
