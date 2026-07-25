@@ -36,6 +36,12 @@ pub enum Command {
     Lift {
         #[arg(default_value = ".")]
         project: PathBuf,
+        /// Resume the latest review session, keeping pending matches literal.
+        #[arg(long)]
+        resume: bool,
+        /// Export the latest verified session to a Git branch.
+        #[arg(long)]
+        export: bool,
     },
     /// Update a generated project to the template repository's HEAD.
     Update {

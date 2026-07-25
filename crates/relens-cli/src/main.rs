@@ -10,6 +10,9 @@ fn main() -> Result<()> {
         if let Some(conflict) = error.downcast_ref::<commands::UpdateConflict>() {
             println!("conflicts: {}", conflict.files.join(","));
         }
+        if let Some(failure) = error.downcast_ref::<commands::ExportVerification>() {
+            println!("verification failed at {}", failure.locations);
+        }
     })?;
     if !cli.quiet {
         println!("{}", output::render(&result, cli.output)?);

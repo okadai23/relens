@@ -1,8 +1,12 @@
 //! Git-backed template source adapter.
 
 pub use relens_domain as domain;
-use relens_domain::{TemplateRef, TemplateSource, TemplateTree};
-use std::{path::Path, process::Command};
+use relens_domain::{LiftSession, ReviewDecision, TemplateRef, TemplateSource, TemplateTree};
+use std::{
+    fs,
+    path::{Component, Path},
+    process::Command,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,6 +40,66 @@ impl GitTemplateSource {
         }
         Ok(output.stdout)
     }
+}
+
+/// Applies a verified session on a dedicated branch and commits it.
+pub fn export_lift(session: &LiftSession) -> Result<String, GitError> {
+    let repository = Path::new(&session.template.locator);
+    let project = Path::new(&session.project)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("project");
+    let branch = format!("lift/{project}-{}", session.id);
+    GitTemplateSource::git(
+        repository,
+        &["checkout", "-b", &branch, &session.template.revision],
+    )?;
+    for edit in &session.edits {
+        let Some(relative) = &edit.template_path else {
+            continue;
+        };
+        let path = Path::new(relative);
+        if path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        {
+            return Err(GitError::Path);
+        }
+        let content = if edit.decision == ReviewDecision::Substitute {
+            edit.substituted.as_deref().unwrap_or(&edit.literal)
+        } else {
+            &edit.literal
+        };
+        let target = repository.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|error| GitError::Command {
+                repository: repository.display().to_string(),
+                message: error.to_string(),
+            })?;
+        }
+        fs::write(&target, content).map_err(|error| GitError::Command {
+            repository: repository.display().to_string(),
+            message: error.to_string(),
+        })?;
+    }
+    GitTemplateSource::git(repository, &["add", "--all"])?;
+    let message = format!(
+        "relens lift from {}\n\nSource-Commit: {}",
+        session.project, session.template.revision
+    );
+    GitTemplateSource::git(
+        repository,
+        &[
+            "-c",
+            "user.name=Relens",
+            "-c",
+            "user.email=relens@example.invalid",
+            "commit",
+            "-m",
+            &message,
+        ],
+    )?;
+    Ok(branch)
 }
 
 impl TemplateSource for GitTemplateSource {

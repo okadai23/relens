@@ -18,7 +18,11 @@ pub fn execute(command: Command) -> Result<CommandResult> {
             answers,
         } => new_project(&template, &destination, &answers),
         Command::Drift { project } => drift(&project, false),
-        Command::Lift { project } => lift(&project),
+        Command::Lift {
+            project,
+            resume,
+            export,
+        } => lift(&project, resume, export),
         Command::Update { project } => update(&project),
         Command::Init { path } => {
             relens_store::initialize(&path).context("failed to initialize relens")
@@ -31,6 +35,12 @@ pub fn execute(command: Command) -> Result<CommandResult> {
 #[error("update has conflicts")]
 pub struct UpdateConflict {
     pub files: Vec<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("lift verification failed")]
+pub struct ExportVerification {
+    pub locations: String,
 }
 
 fn render_tree(
@@ -298,7 +308,10 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
     }
 }
 
-fn lift(project: &Path) -> Result<CommandResult> {
+fn lift(project: &Path, resume: bool, export: bool) -> Result<CommandResult> {
+    if resume || export {
+        return continue_lift(project, export);
+    }
     let changed = relens_store::drift(project)
         .context("failed to inspect drift")?
         .into_iter()
@@ -351,14 +364,77 @@ fn lift(project: &Path) -> Result<CommandResult> {
     }
     let result = relens_lift::lift(&changed, &templates, &project_files, &answer_set.answers)
         .context("failed to lift drift")?;
-    if let relens_lift::Verification::Fail(divergences) = &result.verification {
-        let paths = divergences
+    let id = format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let mut session = relens_domain::LiftSession {
+        id: id.clone(),
+        project: answer_set
+            .answers
+            .get("project_name")
+            .map(AnswerValue::display)
+            .unwrap_or_else(|| project.display().to_string()),
+        template: answer_set.template.clone(),
+        state: relens_domain::LiftSessionState::Reviewing,
+        edits: result
+            .files
             .iter()
-            .map(|divergence| divergence.path.as_str())
-            .collect::<Vec<_>>()
-            .join(",");
-        bail!("round-trip verification failed: {paths}");
+            .map(|file| {
+                let (literal, substituted, decision) = match &file.classification {
+                    relens_lift::Classification::Auto => (
+                        file.content.clone().unwrap_or_default(),
+                        None,
+                        relens_domain::ReviewDecision::Automatic,
+                    ),
+                    relens_lift::Classification::Ambiguous {
+                        literal,
+                        substituted,
+                    } => (
+                        literal.clone(),
+                        Some(substituted.clone()),
+                        relens_domain::ReviewDecision::Pending,
+                    ),
+                    relens_lift::Classification::Unmappable { .. } => (
+                        String::new(),
+                        None,
+                        relens_domain::ReviewDecision::Unmappable,
+                    ),
+                };
+                relens_domain::SessionEdit {
+                    project_path: file.project_path.clone(),
+                    template_path: file.template_path.clone(),
+                    literal,
+                    substituted,
+                    decision,
+                }
+            })
+            .collect(),
+        divergences: match &result.verification {
+            relens_lift::Verification::Pass => vec![],
+            relens_lift::Verification::Fail(items) => items
+                .iter()
+                .map(|item| relens_domain::SessionDivergence {
+                    path: item.path.clone(),
+                    start: 0,
+                    end: item.expected.len().max(item.actual.len()),
+                })
+                .collect(),
+        },
+    };
+    if session.divergences.is_empty()
+        && !session
+            .edits
+            .iter()
+            .any(|edit| edit.decision == relens_domain::ReviewDecision::Pending)
+    {
+        session
+            .verify(vec![])
+            .context("failed to verify lift session")?;
     }
+    relens_store::save_session(project, &session).context("failed to persist lift session")?;
     let patch_path = project.join(".relens/template.patch");
     let mut patch = String::new();
     let mut reports = Vec::new();
@@ -373,6 +449,19 @@ fn lift(project: &Path) -> Result<CommandResult> {
                 }
                 reports.push(format!("{}:Auto", file.project_path));
             }
+            (
+                relens_lift::Classification::Ambiguous {
+                    literal,
+                    substituted,
+                },
+                _,
+                _,
+            ) => {
+                reports.push(format!(
+                    "{}:Ambiguous (candidates: {:?}, {:?})",
+                    file.project_path, substituted, literal
+                ));
+            }
             (relens_lift::Classification::Unmappable { suggestion }, _, _) => {
                 reports.push(format!("{}:Unmappable ({suggestion})", file.project_path));
             }
@@ -382,8 +471,72 @@ fn lift(project: &Path) -> Result<CommandResult> {
     if !patch.is_empty() {
         fs::write(&patch_path, patch).context("failed to write template patch")?;
     }
-    reports.push("verification:Pass".into());
+    reports.push(format!("session:{id}"));
+    reports.push(format!("state:{:?}", session.state));
+    if session.state == relens_domain::LiftSessionState::Verified {
+        reports.push("verification:Pass".into());
+    }
     Ok(CommandResult::new("lifted", reports.join(", ")))
+}
+
+fn continue_lift(project: &Path, export: bool) -> Result<CommandResult> {
+    let mut session =
+        relens_store::load_session(project, None).context("failed to load lift session")?;
+    if export {
+        if !session.divergences.is_empty() {
+            let locations = session
+                .divergences
+                .iter()
+                .map(|d| format!("{}:{}..{}", d.path, d.start, d.end))
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(ExportVerification { locations }.into());
+        }
+        session.export().context("cannot export lift session")?;
+        let branch = relens_vcs::export_lift(&session).context("failed to export lift session")?;
+        relens_store::save_session(project, &session)?;
+        return Ok(CommandResult::new("exported", branch));
+    }
+    let pending = session
+        .edits
+        .iter()
+        .enumerate()
+        .filter_map(|(index, edit)| {
+            (edit.decision == relens_domain::ReviewDecision::Pending).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    for index in pending {
+        session.resolve(index, relens_domain::ReviewDecision::KeepLiteral)?;
+    }
+    session.verify(vec![])?;
+    write_session_patch(project, &session)?;
+    relens_store::save_session(project, &session)?;
+    Ok(CommandResult::new(
+        "resumed",
+        format!("session:{}, state:Verified", session.id),
+    ))
+}
+
+fn write_session_patch(project: &Path, session: &relens_domain::LiftSession) -> Result<()> {
+    let mut patch = String::new();
+    for edit in &session.edits {
+        let Some(path) = &edit.template_path else {
+            continue;
+        };
+        let content = if edit.decision == relens_domain::ReviewDecision::Substitute {
+            edit.substituted.as_deref().unwrap_or(&edit.literal)
+        } else {
+            &edit.literal
+        };
+        patch.push_str(&format!(
+            "--- a/{path}\n+++ b/{path}\n@@ replacement @@\n{content}"
+        ));
+        if !content.ends_with('\n') {
+            patch.push('\n');
+        }
+    }
+    fs::write(project.join(".relens/template.patch"), patch)
+        .context("failed to write template patch")
 }
 
 #[cfg(test)]

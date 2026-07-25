@@ -8,7 +8,13 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Classification {
     Auto,
-    Unmappable { suggestion: String },
+    Ambiguous {
+        literal: String,
+        substituted: String,
+    },
+    Unmappable {
+        suggestion: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,11 +88,32 @@ pub fn lift(
                 source,
             })?;
         let content = apply_rendered_edits(template, &pristine.bytes, rendered.as_bytes(), map);
-        patched.insert(path.clone(), content.clone());
+        let ambiguous = answers.iter().find_map(|(name, value)| {
+            let value = value.display();
+            (!value.is_empty()
+                && rendered.matches(&value).count()
+                    > String::from_utf8_lossy(&pristine.bytes)
+                        .matches(&value)
+                        .count())
+            .then(|| {
+                (
+                    value.clone(),
+                    content.replace(&value, &format!("{{{{ {name} }}}}")),
+                )
+            })
+        });
+        if ambiguous.is_none() {
+            patched.insert(path.clone(), content.clone());
+        }
         files.push(LiftedFile {
             project_path: path.clone(),
             template_path: Some(template_path.clone()),
-            classification: Classification::Auto,
+            classification: ambiguous.map_or(Classification::Auto, |(_, substituted)| {
+                Classification::Ambiguous {
+                    literal: content.clone(),
+                    substituted,
+                }
+            }),
             content: Some(content),
         });
     }
@@ -324,6 +351,25 @@ mod tests {
             Classification::Unmappable { .. }
         ));
         assert_eq!(result.verification, Verification::Pass);
+    }
+
+    #[test]
+    fn accidental_answer_match_has_literal_and_substituted_candidates() {
+        let answers = BTreeMap::from([("project_name".into(), AnswerValue::String("main".into()))]);
+        let pristine = relens_engine::render("header\n", &answers).unwrap();
+        let result = lift(
+            &BTreeSet::from(["file".into()]),
+            &BTreeMap::from([(
+                "file".into(),
+                ("file.j2".into(), "header\n".into(), pristine.source_map),
+            )]),
+            &BTreeMap::from([("file".into(), b"header\nrun main here\n".to_vec())]),
+            &answers,
+        )
+        .unwrap();
+        assert!(matches!(&result.files[0].classification,
+            Classification::Ambiguous { literal, substituted }
+            if literal.contains("run main here") && substituted.contains("run {{ project_name }} here")));
     }
 
     proptest! {
