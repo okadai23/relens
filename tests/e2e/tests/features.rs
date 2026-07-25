@@ -18,6 +18,7 @@ pub struct RelensWorld {
     last_cli: Option<CliOutput>,
     session_id: Option<String>,
     second_project: Option<PathBuf>,
+    external_target: Option<PathBuf>,
 }
 
 impl Default for RelensWorld {
@@ -29,6 +30,7 @@ impl Default for RelensWorld {
             last_cli: None,
             session_id: None,
             second_project: None,
+            external_target: None,
         }
     }
 }
@@ -85,9 +87,55 @@ fn generate_with_defaults(world: &mut RelensWorld) {
     generate(world, "default", &[]);
 }
 
+#[given(regex = r#"^生成先のファイル "README.md" が外部ファイルへのシンボリックリンクである$"#)]
+fn destination_file_is_external_symlink(world: &mut RelensWorld) {
+    let root = world.root.as_ref().unwrap().path();
+    let destination = root.join("symlinked");
+    let external_target = root.join("external-readme.md");
+    fs::create_dir(&destination).unwrap();
+    fs::write(&external_target, b"outside must remain unchanged").unwrap();
+    create_file_symlink(&external_target, &destination.join("README.md"));
+    world.project_directory = Some(destination);
+    world.external_target = Some(external_target);
+}
+
+#[when(regex = r#"^シンボリックリンクがある生成先へ "relens new python-lib" を実行する$"#)]
+fn generate_into_symlinked_destination(world: &mut RelensWorld) {
+    let template = world.template_repository.clone().unwrap();
+    let destination = world.project_directory.clone().unwrap();
+    world.run_cli(&[
+        "new",
+        template.to_str().unwrap(),
+        "--destination",
+        destination.to_str().unwrap(),
+    ]);
+}
+
 #[then("終了コードは 0 である")]
 fn exit_is_success(world: &mut RelensWorld) {
     assert_eq!(world.last_cli.as_ref().unwrap().status, 0);
+}
+
+#[then("終了コードは 0 ではない")]
+fn exit_is_failure(world: &mut RelensWorld) {
+    assert_ne!(world.last_cli.as_ref().unwrap().status, 0);
+}
+
+#[then("エラーはシンボリックリンクへの書き込み拒否を示す")]
+fn error_rejects_symlink_write(world: &mut RelensWorld) {
+    let stderr = String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stderr);
+    assert!(
+        stderr.contains("refusing to write through symlink"),
+        "{stderr}"
+    );
+}
+
+#[then("外部ファイルの内容は変更されていない")]
+fn external_file_is_unchanged(world: &mut RelensWorld) {
+    assert_eq!(
+        fs::read(world.external_target.as_ref().unwrap()).unwrap(),
+        b"outside must remain unchanged"
+    );
 }
 
 #[then(regex = r##"^ファイル "README.md" の内容は "# myapp" で始まる$"##)]
@@ -235,6 +283,16 @@ fn git_commit(path: &Path) {
             .unwrap()
             .success()
     );
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) {
+    std::os::windows::fs::symlink_file(target, link).unwrap();
 }
 
 fn git_output(path: &Path, args: &[&str]) -> String {
