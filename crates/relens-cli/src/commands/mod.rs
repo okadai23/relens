@@ -51,6 +51,7 @@ fn render_tree(
             .strip_suffix(".j2")
             .unwrap_or(&output_path)
             .replace('\\', "/");
+        let output_path = relens_store::portable_path(&safe_relative_path(&output_path)?);
         let output = relens_engine::render(source, answers)
             .with_context(|| format!("failed to render {path}"))?;
         if !output.bytes.is_empty() {
@@ -272,8 +273,9 @@ fn drift(project: &Path, lift: bool) -> Result<CommandResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_relative_path;
-    use std::path::PathBuf;
+    use super::{render_tree, safe_relative_path};
+    use relens_domain::{AnswerValue, TemplateTree};
+    use std::{collections::BTreeMap, path::PathBuf};
 
     #[test]
     fn accepts_only_paths_confined_to_the_destination() {
@@ -283,6 +285,28 @@ mod tests {
         );
         for unsafe_path in ["", "/tmp/file", "../file", "src/../../file", "C:/file"] {
             assert!(safe_relative_path(unsafe_path).is_err(), "{unsafe_path}");
+        }
+    }
+
+    fn answers(name: &str) -> BTreeMap<String, AnswerValue> {
+        BTreeMap::from([("name".to_string(), AnswerValue::String(name.into()))])
+    }
+
+    #[test]
+    fn render_tree_normalizes_paths_confined_to_the_project() {
+        let tree = TemplateTree::from([("src/./{{ name }}.py.j2".to_string(), b"pass".to_vec())]);
+        let rendered = render_tree(&tree, &answers("main")).unwrap();
+        assert_eq!(rendered.keys().collect::<Vec<_>>(), ["src/main.py"]);
+    }
+
+    #[test]
+    fn render_tree_rejects_paths_escaping_the_project() {
+        let tree = TemplateTree::from([("{{ name }}/file.txt.j2".to_string(), b"data".to_vec())]);
+        for escaping in ["../..", "/tmp"] {
+            assert!(
+                render_tree(&tree, &answers(escaping)).is_err(),
+                "{escaping}"
+            );
         }
     }
 }
