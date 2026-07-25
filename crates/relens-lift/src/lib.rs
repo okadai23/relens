@@ -218,10 +218,22 @@ fn literal_offset(span: &SourceSpan, rendered_offset: usize) -> Option<usize> {
 }
 
 fn protect_jinja(bytes: &[u8]) -> Vec<u8> {
-    String::from_utf8_lossy(bytes)
-        .replace("{%", "{% raw %}{%{% endraw %}")
-        .replace("{{", "{% raw %}{{{% endraw %}")
-        .into_bytes()
+    let mut protected = Vec::with_capacity(bytes.len());
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        if remaining.starts_with(b"{%") {
+            protected.extend_from_slice(b"{% raw %}{%{% endraw %}");
+            offset += 2;
+        } else if remaining.starts_with(b"{{") {
+            protected.extend_from_slice(b"{% raw %}{{{% endraw %}");
+            offset += 2;
+        } else {
+            protected.push(bytes[offset]);
+            offset += 1;
+        }
+    }
+    protected
 }
 
 #[cfg(test)]
@@ -282,6 +294,20 @@ mod tests {
 
         assert!(lifted.contains("{% for letter in letters %}"));
         assert!(lifted.contains("{% endfor %}"));
+    }
+
+    #[test]
+    fn preserves_utf8_when_diff_replaces_a_continuation_byte() {
+        let template = "café\n";
+        let pristine = relens_engine::render(template, &BTreeMap::new()).unwrap();
+        let lifted = apply_rendered_edits(
+            template,
+            &pristine.bytes,
+            "cafê\n".as_bytes(),
+            &pristine.source_map,
+        );
+
+        assert_eq!(lifted, "cafê\n");
     }
 
     #[test]
