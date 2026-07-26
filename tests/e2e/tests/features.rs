@@ -41,12 +41,12 @@ fn template_repository_exists(world: &mut RelensWorld) {
     fs::create_dir_all(template.join("{{ project_name }}")).unwrap();
     fs::write(
         template.join("relens.toml"),
-        "[questions.project_name]\ntype = \"string\"\ndefault = \"sample\"\n[questions.use_docker]\ntype = \"bool\"\ndefault = false\n",
+        "[questions.project_name]\ntype = \"string\"\ndefault = \"sample\"\n[questions.use_docker]\ntype = \"bool\"\ndefault = false\n[questions.include_docs]\ntype = \"bool\"\ndefault = true\n",
     )
     .unwrap();
     fs::write(
         template.join("README.md.j2"),
-        "# {{ project_name }}\n定型の説明文",
+        "{% if include_docs %}# {{ project_name }}\n定型の説明文{% endif %}",
     )
     .unwrap();
     fs::write(
@@ -502,6 +502,15 @@ fn jinja_is_raw(world: &mut RelensWorld) {
     assert!(patch(world).contains("{% raw %}{{{% endraw %} example }}"));
 }
 
+#[then("raw ブロックは外側の if ブロック内に保持されている")]
+fn raw_stays_inside_outer_if(world: &mut RelensWorld) {
+    let patch = patch(world);
+    let if_start = patch.find("{% if include_docs %}").unwrap();
+    let raw = patch.find("{% raw %}{{{% endraw %} example }}").unwrap();
+    let if_end = patch.find("{% endif %}").unwrap();
+    assert!(if_start < raw && raw < if_end);
+}
+
 #[then(regex = r#"^ラウンドトリップ検証は \"Pass\" である$"#)]
 fn verification_passes(world: &mut RelensWorld) {
     assert!(
@@ -602,6 +611,39 @@ fn patch_keeps_literal(world: &mut RelensWorld) {
 fn verified_session_exists(world: &mut RelensWorld) {
     fix_literal_typo(world);
     run_lift(world);
+}
+
+#[cfg(unix)]
+#[given("検証済み LiftSession のエクスポート先が外部ファイルへの追跡済みシンボリックリンクである")]
+fn verified_export_targets_tracked_symlink(world: &mut RelensWorld) {
+    use std::os::unix::fs::symlink;
+
+    verified_session_exists(world);
+    let repository = world.template_repository.as_ref().unwrap();
+    let target = repository.join("README.md.j2");
+    let outside = world.root.as_ref().unwrap().path().join("outside");
+    fs::write(&outside, "outside must remain unchanged").unwrap();
+    fs::remove_file(&target).unwrap();
+    symlink(&outside, &target).unwrap();
+    git_commit(repository, "replace export target with symlink");
+    let revision = git_output(repository, &["rev-parse", "HEAD"]);
+
+    let sessions = world
+        .project_directory
+        .as_ref()
+        .unwrap()
+        .join(".relens/sessions");
+    let session_path = fs::read_dir(sessions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+    json["template"]["revision"] = revision.trim().into();
+    fs::write(session_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    world.outside_file = Some(outside);
 }
 
 #[when(regex = r#"^\"relens lift --export\" を実行する$"#)]
@@ -773,6 +815,7 @@ fn executes_completed_m4_lift_features_with_cucumber_steps() {
                     || scenario
                         .name
                         .contains("テンプレートリポジトリへエクスポート")
+                    || (cfg!(unix) && scenario.name.contains("エクスポート先の追跡済み"))
             })
             .await;
     });
@@ -995,7 +1038,7 @@ default = false
         .stdout(predicates::str::contains("no-patch"));
 }
 
-/// Executable cucumber-step coverage for the four M2 update scenarios.
+/// Executable cucumber-step coverage for the core M2 update scenarios.
 #[test]
 fn m2_update_scenarios() {
     let root = tempfile::tempdir().unwrap();
@@ -1100,6 +1143,129 @@ fn m2_update_scenarios() {
             .unwrap()
             .contains("<<<<<<< project")
     );
+}
+
+/// Whole-file assertion for the multiple non-overlapping changes scenario in
+/// update.feature. This intentionally exercises two project hunks around one
+/// template hunk in the same rendered file.
+#[test]
+fn update_merges_multiple_non_overlapping_changes_in_one_file() {
+    let root = tempfile::tempdir().unwrap();
+    // macOS exposes temporary directories through `/var`, while canonical paths
+    // use `/private/var`. Keep every path handed to relens in the same canonical
+    // namespace so its repository-confinement checks do not compare aliases.
+    let root_path = root.path().canonicalize().unwrap();
+    let template = root_path.join("multi-hunk-template");
+    fs::create_dir_all(&template).unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "Heading\nfirst\nmiddle\nlast\nFooter\n",
+    )
+    .unwrap();
+    git_commit(&template, "v1");
+
+    let project = root_path.join("project");
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args([
+            "new",
+            template.to_str().unwrap(),
+            "-d",
+            project.to_str().unwrap(),
+            "-a",
+            "name=unused",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        project.join("README.md"),
+        "Local heading\nfirst\nmiddle\nlast\nLocal footer\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "Heading\nfirst\nTemplate middle\nlast\nFooter\n",
+    )
+    .unwrap();
+    git_commit(&template, "v2");
+
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["update", project.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(project.join("README.md")).unwrap(),
+        "Local heading\nfirst\nTemplate middle\nlast\nLocal footer\n"
+    );
+}
+
+/// Regression coverage for an answer rename across template revisions and a
+/// subsequent no-op update, matching the migration scenario in update.feature.
+#[test]
+fn update_applies_each_migration_once_and_renders_the_old_revision_with_old_answers() {
+    let root = tempfile::tempdir().unwrap();
+    let template = root.path().join("rename-template");
+    fs::create_dir_all(&template).unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.project_name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(template.join("README.md.j2"), "# {{ project_name }}\n").unwrap();
+    git_commit(&template, "v1");
+
+    let project = root.path().join("project");
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args([
+            "new",
+            template.to_str().unwrap(),
+            "-d",
+            project.to_str().unwrap(),
+            "-a",
+            "project_name=myapp",
+        ])
+        .assert()
+        .success();
+
+    fs::create_dir(template.join("migrations")).unwrap();
+    fs::write(
+        template.join("migrations/001-package-name.json"),
+        r#"{"rename":{"project_name":"package_name"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.package_name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ package_name }}\nupdated\n",
+    )
+    .unwrap();
+    git_commit(&template, "v2");
+
+    for _ in 0..2 {
+        CliCommand::cargo_bin("relens")
+            .unwrap()
+            .args(["update", project.to_str().unwrap()])
+            .assert()
+            .success();
+    }
+    assert_eq!(
+        fs::read_to_string(project.join("README.md")).unwrap(),
+        "# myapp\nupdated\n"
+    );
+    let answers = fs::read_to_string(project.join(".relens/answers.toml")).unwrap();
+    assert!(answers.contains("package_name"));
+    assert!(!answers.contains("project_name"));
 }
 
 #[cfg(unix)]

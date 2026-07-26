@@ -128,8 +128,9 @@ fn update(project: &Path) -> Result<CommandResult> {
     let new_tree = source
         .fetch(&latest)
         .context("failed to fetch latest template")?;
-    answers.answers = apply_migrations(&new_tree, &answers.answers)?;
-    let base = render_tree(&old_tree, &answers.answers)?;
+    let original_answers = answers.answers.clone();
+    answers.answers = apply_migrations(&old_tree, &new_tree, &original_answers)?;
+    let base = render_tree(&old_tree, &original_answers)?;
     let updated = render_tree(&new_tree, &answers.answers)?;
     let paths = base
         .keys()
@@ -191,13 +192,15 @@ fn update(project: &Path) -> Result<CommandResult> {
 }
 
 fn apply_migrations(
-    tree: &TemplateTree,
+    old_tree: &TemplateTree,
+    new_tree: &TemplateTree,
     answers: &BTreeMap<String, AnswerValue>,
 ) -> Result<BTreeMap<String, AnswerValue>> {
     let mut migrated = answers.clone();
-    for (path, bytes) in tree
+    for (path, bytes) in new_tree
         .iter()
         .filter(|(path, _)| path.starts_with("migrations/") && path.ends_with(".json"))
+        .filter(|(path, bytes)| old_tree.get(*path) != Some(*bytes))
     {
         let migration: relens_domain::Migration =
             serde_json::from_slice(bytes).with_context(|| format!("invalid migration {path}"))?;

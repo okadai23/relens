@@ -30,11 +30,13 @@
 - [x] **[DONE] `roundtrip.feature`: GetPut 則 — ドリフトがなければパッチは空**
 - [x] **[DONE] Questionnaire / AnswerSet / TemplateRef の型と検証を実装する**
 - [x] **[DONE] Jinja サブセット parser と非対応構文の診断を実装する**
+  - 共通 tokenizer で render と if/for 構造走査の字句規則を統一し、raw 内の終端風タグを無視する unit test で検証。
 - [x] **[DONE] `.relens/answers.toml` と `lock.json` の永続化を実装する**
   - 型付き回答、決定的なファイル走査、計装 render、空ドリフトの GetPut を実装。
   - `relens-domain`、`relens-engine`、`relens-store` と CLI の `new` / `drift` / `lift` を更新。
   - crate unit test と `cargo test -p relens-cli --test features` の M1 シナリオで検証。
   - Windows でもテンプレートパスと lock のキーを `/` 区切りへ正規化し、生成直後の誤検出を防止。
+  - 決定的なファイル走査は、エントリ取得と相対パス変換の失敗も対象パス付きで呼び出し元へ伝播し、部分的な drift や clean を返さない。
 
 ## M2 — update
 
@@ -44,14 +46,16 @@
 - [x] **[DONE] TemplateSource と git adapter を実装する**
 - [x] **[DONE] pristine/base/project の 3-way merge を unit test する**
   - 記録済み commit とテンプレート HEAD を Git adapter で取得し、回答を再利用して双方を render する `relens update` を追加。
-  - 片側変更と非重複行変更を自動統合し、競合時は marker を書き込んで衝突ファイルを stdout に報告。
-  - engine unit test と `cargo test -p relens-cli --test features` の M2 受け入れシナリオで検証。
+  - base 座標の全 diff hunk を抽出し、複数の非連続・隣接変更、削除、同一点挿入、UTF-8 と EOF 改行を規定して自動統合する。バイナリの両側変更は保守的に競合とする。
+  - 複数 hunk の間への変更を統合する unit test、一部 hunk だけが重複する競合 test、および同一ファイルの結果全体を確認する cucumber E2E で検証。
+  - macOS の `/var` と `/private/var` の一時ディレクトリエイリアスを跨がないよう E2E fixture の root を正規化し、native CI のパス制約検査を安定化。
 
 ## M3 — Auto lift と verify
 
 - [x] **[DONE] `lift.feature`: リテラル部分の修正を Auto で持ち上げる**
 - [x] **[DONE] `lift.feature`: 変数由来値を逆置換する**
 - [x] **[DONE] `lift.feature`: Jinja メタ文字を raw block で保護する**
+  - 外側の if 内へ追加した raw 保護文字列の構造維持を cucumber で、raw を含むネストした if/for を engine unit test で検証。
 - [x] **[DONE] `lift.feature`: 追加ファイルを Unmappable として扱う**
 - [x] **[DONE] `lift.feature`: 生成ファイルの削除ドリフトを持ち上げる**
 - [x] **[DONE] `roundtrip.feature`: PutGet のシナリオアウトライン**
@@ -71,9 +75,13 @@
 - [x] **[DONE] `lift.feature`: 検証失敗パッチの export を禁止する**
 - [x] **[DONE] `lift.feature`: Verified session を git branch へ export する**
 - [x] **[DONE] LiftSession の状態遷移と永続化を unit test する**
+- [x] **[DONE] export 先のシンボリックリンク経由書き込みを拒否する**
   - 偶然一致の2候補、レビュー裁定、検証ゲートを domain/lift に実装。
   - `.relens/sessions` の JSON 永続化と Verified session の Git branch export を追加。
   - M4 の cucumber シナリオと状態遷移・永続化 unit test、workspace 品質ゲートで検証。
+  - export 前にリポジトリルートから対象までを `symlink_metadata` で検査し、canonicalize
+    した既存パスがルート配下にあることを確認。追跡済みファイルとリンクされた親の unit test、
+    export の cucumber シナリオで外部ファイルが変更されないことを検証。
 
 ## M5 — matrix と拡張
 
