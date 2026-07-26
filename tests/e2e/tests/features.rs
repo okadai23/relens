@@ -1066,6 +1066,69 @@ fn m2_update_scenarios() {
     );
 }
 
+/// Regression coverage for an answer rename across template revisions and a
+/// subsequent no-op update, matching the migration scenario in update.feature.
+#[test]
+fn update_applies_each_migration_once_and_renders_the_old_revision_with_old_answers() {
+    let root = tempfile::tempdir().unwrap();
+    let template = root.path().join("rename-template");
+    fs::create_dir_all(&template).unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.project_name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(template.join("README.md.j2"), "# {{ project_name }}\n").unwrap();
+    git_commit(&template, "v1");
+
+    let project = root.path().join("project");
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args([
+            "new",
+            template.to_str().unwrap(),
+            "-d",
+            project.to_str().unwrap(),
+            "-a",
+            "project_name=myapp",
+        ])
+        .assert()
+        .success();
+
+    fs::create_dir(template.join("migrations")).unwrap();
+    fs::write(
+        template.join("migrations/001-package-name.json"),
+        r#"{"rename":{"project_name":"package_name"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.package_name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ package_name }}\nupdated\n",
+    )
+    .unwrap();
+    git_commit(&template, "v2");
+
+    for _ in 0..2 {
+        CliCommand::cargo_bin("relens")
+            .unwrap()
+            .args(["update", project.to_str().unwrap()])
+            .assert()
+            .success();
+    }
+    assert_eq!(
+        fs::read_to_string(project.join("README.md")).unwrap(),
+        "# myapp\nupdated\n"
+    );
+    let answers = fs::read_to_string(project.join(".relens/answers.toml")).unwrap();
+    assert!(answers.contains("package_name"));
+    assert!(!answers.contains("project_name"));
+}
+
 #[cfg(unix)]
 #[test]
 fn update_rejects_a_path_through_a_symlinked_directory() {
