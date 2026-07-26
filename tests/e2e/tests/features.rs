@@ -277,6 +277,34 @@ fn generated_python_project(world: &mut RelensWorld) {
 }
 
 #[given(
+    regex = r#"^テンプレート "python-lib" v1 から回答 "project_name=myapp" で生成されたプロジェクトがある$"#
+)]
+fn generated_update_project(world: &mut RelensWorld) {
+    generated_python_project(world);
+}
+
+#[given(
+    regex = r#"^プロジェクトとテンプレート v2 が "README.md" の同じ行を異なる内容へ変更している$"#
+)]
+fn create_update_conflict(world: &mut RelensWorld) {
+    let project = world.project_directory.as_ref().unwrap();
+    fs::write(project.join("README.md"), "# myapp\nLocal text\n").unwrap();
+    let template = world.template_repository.as_ref().unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ project_name }}\nTemplate text\n",
+    )
+    .unwrap();
+    git_commit(template, "v2 conflict");
+}
+
+#[when(regex = r#"^JSON モードで "relens update" を実行する$"#)]
+fn run_json_update(world: &mut RelensWorld) {
+    let project = world.project_directory.clone().unwrap();
+    world.run_cli(&["update", project.to_str().unwrap(), "--output", "json"]);
+}
+
+#[given(
     regex = r#"^テンプレート \"python-lib\" と回答 \"(.+)\" から生成されたプロジェクトがある$"#
 )]
 fn generated_roundtrip_project(world: &mut RelensWorld, raw_answers: String) {
@@ -608,6 +636,41 @@ fn export_lift(world: &mut RelensWorld) {
     world.run_cli(&["lift", project.to_str().unwrap(), "--export"]);
 }
 
+#[when(regex = r#"^JSON モードで "relens lift --export" を実行する$"#)]
+fn export_lift_json(world: &mut RelensWorld) {
+    let project = world.project_directory.clone().unwrap();
+    world.run_cli(&[
+        "lift",
+        project.to_str().unwrap(),
+        "--export",
+        "--output",
+        "json",
+    ]);
+}
+
+#[then("標準出力は更新競合を表す単一の JSON 値である")]
+fn conflict_is_single_json(world: &mut RelensWorld) {
+    let value: serde_json::Value =
+        serde_json::from_slice(&world.last_cli.as_ref().unwrap().stdout).unwrap();
+    assert_eq!(value["status"], "conflict");
+    assert_eq!(value["files"], serde_json::json!(["README.md"]));
+}
+
+#[then("標準出力は検証失敗を表す単一の JSON 値である")]
+fn verification_is_single_json(world: &mut RelensWorld) {
+    let value: serde_json::Value =
+        serde_json::from_slice(&world.last_cli.as_ref().unwrap().stdout).unwrap();
+    assert_eq!(value["status"], "verification_failed");
+    assert_eq!(value["locations"], "README.md:0..8");
+}
+
+#[then("診断は標準エラー出力だけに表示される")]
+fn diagnostics_are_stderr_only(world: &mut RelensWorld) {
+    let output = world.last_cli.as_ref().unwrap();
+    assert!(!output.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("{\"status\""));
+}
+
 #[then(regex = r#"^テンプレートリポジトリにブランチ \"lift/myapp-<セッションID>\" が作成される$"#)]
 fn export_branch_exists(world: &mut RelensWorld) {
     let branches = git_output(
@@ -767,10 +830,23 @@ fn executes_completed_m4_lift_features_with_cucumber_steps() {
                 scenario.name.contains("偶然一致")
                     || scenario.name.contains("リテラル維持")
                     || scenario.name.contains("検証に失敗")
+                    || scenario.name.contains("JSON モードの検証失敗")
                     || scenario
                         .name
                         .contains("テンプレートリポジトリへエクスポート")
                     || (cfg!(unix) && scenario.name.contains("エクスポート先の追跡済み"))
+            })
+            .await;
+    });
+}
+
+#[test]
+fn executes_json_update_feature_with_cucumber_steps() {
+    let feature = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features/update.feature");
+    futures::executor::block_on(async {
+        RelensWorld::cucumber()
+            .filter_run_and_exit(feature, |_, _, scenario| {
+                scenario.name.contains("JSON モード")
             })
             .await;
     });

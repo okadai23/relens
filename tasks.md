@@ -94,4 +94,6 @@
 1. 対応シナリオが cucumber-rs で通る。
 2. 再利用可能なドメイン動作に unit test、lens 則に property test がある。
 3. human/JSON 出力と stdout/stderr の契約を維持する。
+   - 成功・更新競合・lift 検証失敗を共通の構造化出力層から human/JSON へ変換するよう統一した。
+   - update conflict と export verification failure の JSON 契約を CLI integration test と cucumber で検証し、単一 JSON stdout、診断 stderr、非ゼロ終了コードを確認した。
 4. README に列挙された format、Clippy、test、cargo-deny、release build が通る。
