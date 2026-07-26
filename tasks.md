@@ -30,6 +30,7 @@
 - [x] **[DONE] `roundtrip.feature`: GetPut 則 — ドリフトがなければパッチは空**
 - [x] **[DONE] Questionnaire / AnswerSet / TemplateRef の型と検証を実装する**
 - [x] **[DONE] Jinja サブセット parser と非対応構文の診断を実装する**
+  - 共通 tokenizer で render と if/for 構造走査の字句規則を統一し、raw 内の終端風タグを無視する unit test で検証。
 - [x] **[DONE] `.relens/answers.toml` と `lock.json` の永続化を実装する**
   - 型付き回答、決定的なファイル走査、計装 render、空ドリフトの GetPut を実装。
   - `relens-domain`、`relens-engine`、`relens-store` と CLI の `new` / `drift` / `lift` を更新。
@@ -54,6 +55,7 @@
 - [x] **[DONE] `lift.feature`: リテラル部分の修正を Auto で持ち上げる**
 - [x] **[DONE] `lift.feature`: 変数由来値を逆置換する**
 - [x] **[DONE] `lift.feature`: Jinja メタ文字を raw block で保護する**
+  - 外側の if 内へ追加した raw 保護文字列の構造維持を cucumber で、raw を含むネストした if/for を engine unit test で検証。
 - [x] **[DONE] `lift.feature`: 追加ファイルを Unmappable として扱う**
 - [x] **[DONE] `roundtrip.feature`: PutGet のシナリオアウトライン**
 - [x] **[DONE] PutGet/GetPut の proptest generator と shrinking を実装する**

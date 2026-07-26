@@ -41,12 +41,12 @@ fn template_repository_exists(world: &mut RelensWorld) {
     fs::create_dir_all(template.join("{{ project_name }}")).unwrap();
     fs::write(
         template.join("relens.toml"),
-        "[questions.project_name]\ntype = \"string\"\ndefault = \"sample\"\n[questions.use_docker]\ntype = \"bool\"\ndefault = false\n",
+        "[questions.project_name]\ntype = \"string\"\ndefault = \"sample\"\n[questions.use_docker]\ntype = \"bool\"\ndefault = false\n[questions.include_docs]\ntype = \"bool\"\ndefault = true\n",
     )
     .unwrap();
     fs::write(
         template.join("README.md.j2"),
-        "# {{ project_name }}\n定型の説明文",
+        "{% if include_docs %}# {{ project_name }}\n定型の説明文{% endif %}",
     )
     .unwrap();
     fs::write(
@@ -465,6 +465,15 @@ fn answer_not_literal(world: &mut RelensWorld) {
 #[then(regex = r#"^TemplatePatch 内で当該文字列は raw ブロックで保護されている$"#)]
 fn jinja_is_raw(world: &mut RelensWorld) {
     assert!(patch(world).contains("{% raw %}{{{% endraw %} example }}"));
+}
+
+#[then("raw ブロックは外側の if ブロック内に保持されている")]
+fn raw_stays_inside_outer_if(world: &mut RelensWorld) {
+    let patch = patch(world);
+    let if_start = patch.find("{% if include_docs %}").unwrap();
+    let raw = patch.find("{% raw %}{{{% endraw %} example }}").unwrap();
+    let if_end = patch.find("{% endif %}").unwrap();
+    assert!(if_start < raw && raw < if_end);
 }
 
 #[then(regex = r#"^ラウンドトリップ検証は \"Pass\" である$"#)]
