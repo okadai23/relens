@@ -304,7 +304,14 @@ fn append(out: &mut Vec<u8>, spans: &mut Vec<SourceSpan>, child: RenderedText) {
 }
 
 /// Merge a pristine render, a user's project file, and a newly rendered file.
-/// Equal sides are resolved without markers; competing edits are made explicit.
+///
+/// UTF-8 inputs are diffed as newline-inclusive lines, which preserves both UTF-8
+/// text and the presence or absence of the final newline. Every hunk is expressed
+/// in base coordinates. Deletions and replacements conflict only when their base
+/// ranges overlap; adjacent hunks and insertions at a replacement boundary do not.
+/// Identical insertions at the same point are deduplicated, while different
+/// insertions at that point conflict. Binary inputs retain the conservative policy:
+/// an edit on only one side is accepted, but competing edits conflict.
 pub fn three_way_merge(base: &[u8], project: &[u8], updated: &[u8]) -> MergeResult {
     if project == base || project == updated {
         return MergeResult::Merged(updated.to_vec());
@@ -318,22 +325,26 @@ pub fn three_way_merge(base: &[u8], project: &[u8], updated: &[u8]) -> MergeResu
         std::str::from_utf8(updated),
     ) {
         let base_lines = base.split_inclusive('\n').collect::<Vec<_>>();
-        let local_edit = single_edit(
+        let local_edits = diff_hunks(
             &base_lines,
             &project.split_inclusive('\n').collect::<Vec<_>>(),
         );
-        let template_edit = single_edit(
+        let template_edits = diff_hunks(
             &base_lines,
             &updated.split_inclusive('\n').collect::<Vec<_>>(),
         );
-        let same_insertion = local_edit.start == local_edit.end
-            && template_edit.start == template_edit.end
-            && local_edit.start == template_edit.start;
-        if !same_insertion
-            && (local_edit.end <= template_edit.start || template_edit.end <= local_edit.start)
-        {
+        if local_edits.iter().all(|local| {
+            template_edits
+                .iter()
+                .all(|template| compatible(local, template))
+        }) {
             let mut lines = base_lines;
-            let mut edits = [local_edit, template_edit];
+            let mut edits = local_edits;
+            for edit in template_edits {
+                if !edits.iter().any(|existing| existing == &edit) {
+                    edits.push(edit);
+                }
+            }
             // Apply edits from the end of the base towards the beginning so their
             // coordinates remain valid. At an equal start, apply a replacement
             // before an insertion: the insertion is then placed in front of the
@@ -359,25 +370,70 @@ pub fn three_way_merge(base: &[u8], project: &[u8], updated: &[u8]) -> MergeResu
     MergeResult::Conflict(marked)
 }
 
+#[derive(PartialEq, Eq)]
 struct LineEdit<'a> {
     start: usize,
     end: usize,
     replacement: Vec<&'a str>,
 }
 
-fn single_edit<'a>(base: &[&str], changed: &[&'a str]) -> LineEdit<'a> {
-    let prefix = base.iter().zip(changed).take_while(|(a, b)| a == b).count();
-    let suffix = base[prefix..]
-        .iter()
-        .rev()
-        .zip(changed[prefix..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    LineEdit {
-        start: prefix,
-        end: base.len() - suffix,
-        replacement: changed[prefix..changed.len() - suffix].to_vec(),
+fn compatible(left: &LineEdit<'_>, right: &LineEdit<'_>) -> bool {
+    let left_insertion = left.start == left.end;
+    let right_insertion = right.start == right.end;
+    if left_insertion && right_insertion && left.start == right.start {
+        return left.replacement == right.replacement;
     }
+    if left_insertion || right_insertion {
+        let (insertion, changed) = if left_insertion {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        return insertion.start <= changed.start || insertion.start >= changed.end;
+    }
+    left.end <= right.start || right.end <= left.start
+}
+
+/// Computes all line hunks using an LCS table. Equal runs terminate a hunk, so
+/// distinct edits remain independently mergeable instead of becoming one span.
+fn diff_hunks<'a>(base: &[&str], changed: &[&'a str]) -> Vec<LineEdit<'a>> {
+    let mut lcs = vec![vec![0; changed.len() + 1]; base.len() + 1];
+    for i in (0..base.len()).rev() {
+        for j in (0..changed.len()).rev() {
+            lcs[i][j] = if base[i] == changed[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut hunks = Vec::new();
+    while i < base.len() || j < changed.len() {
+        if i < base.len() && j < changed.len() && base[i] == changed[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        let start = i;
+        let replacement_start = j;
+        while i < base.len() || j < changed.len() {
+            if i < base.len() && j < changed.len() && base[i] == changed[j] {
+                break;
+            }
+            if j < changed.len() && (i == base.len() || lcs[i][j + 1] >= lcs[i + 1][j]) {
+                j += 1;
+            } else {
+                i += 1;
+            }
+        }
+        hunks.push(LineEdit {
+            start,
+            end: i,
+            replacement: changed[replacement_start..j].to_vec(),
+        });
+    }
+    hunks
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -493,5 +549,61 @@ mod tests {
             three_way_merge(b"a\n", b"x\na\n", b"A\n"),
             MergeResult::Merged(b"x\nA\n".to_vec())
         );
+    }
+
+    #[test]
+    fn three_way_merge_combines_multiple_local_hunks_around_a_template_hunk() {
+        assert_eq!(
+            three_way_merge(
+                b"one\ntwo\nthree\nfour\nfive\n",
+                b"ONE\ntwo\nthree\nfour\nFIVE\n",
+                b"one\ntwo\nTHREE\nfour\nfive\n",
+            ),
+            MergeResult::Merged(b"ONE\ntwo\nTHREE\nfour\nFIVE\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn three_way_merge_conflicts_when_only_one_of_multiple_hunks_overlaps() {
+        assert!(matches!(
+            three_way_merge(
+                b"one\ntwo\nthree\nfour\n",
+                b"ONE\ntwo\nlocal three\nfour\n",
+                b"one\ntwo\ntemplate three\nFOUR\n",
+            ),
+            MergeResult::Conflict(_)
+        ));
+    }
+
+    #[test]
+    fn three_way_merge_deduplicates_identical_insertions_and_preserves_utf8_and_eof() {
+        assert_eq!(
+            three_way_merge(
+                "甲\n乙".as_bytes(),
+                "甲\n追加\n乙".as_bytes(),
+                "甲\n追加\n乙".as_bytes()
+            ),
+            MergeResult::Merged("甲\n追加\n乙".as_bytes().to_vec())
+        );
+        assert!(matches!(
+            three_way_merge(b"a\n", b"a\nlocal\n", b"a\ntemplate\n"),
+            MergeResult::Conflict(_)
+        ));
+    }
+
+    #[test]
+    fn three_way_merge_handles_deletion_and_adjacent_hunks() {
+        assert_eq!(
+            three_way_merge(b"a\nb\nc\n", b"a\nc\n", b"a\nb\nC\n"),
+            MergeResult::Merged(b"a\nC\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn three_way_merge_treats_competing_binary_changes_as_a_conflict() {
+        assert!(matches!(
+            three_way_merge(&[0, 1], &[0, 2], &[0, 3]),
+            MergeResult::Conflict(_)
+        ));
     }
 }
