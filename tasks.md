@@ -96,4 +96,5 @@
 3. human/JSON 出力と stdout/stderr の契約を維持する。
    - 成功・更新競合・lift 検証失敗を共通の構造化出力層から human/JSON へ変換するよう統一した。
    - update conflict と export verification failure の JSON 契約を CLI integration test と cucumber で検証し、単一 JSON stdout、診断 stderr、非ゼロ終了コードを確認した。
+   - macOS CI で並行 cucumber runner が共有 reporter と競合したため、feature runner の実行期間を直列化して全プラットフォームで安定化した。
 4. README に列挙された format、Clippy、test、cargo-deny、release build が通る。

@@ -3,6 +3,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use assert_cmd::Command as CliCommand;
@@ -19,6 +20,17 @@ pub struct RelensWorld {
     session_id: Option<String>,
     second_project: Option<PathBuf>,
     outside_file: Option<PathBuf>,
+}
+
+// cucumber-rs registers steps globally and writes through a shared reporter.
+// Running multiple feature runners concurrently is therefore unsupported and
+// was flaky on the macOS CI runner. Keep the individual test targets, but
+// serialize their runner lifetimes.
+fn cucumber_runner_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Default for RelensWorld {
@@ -787,6 +799,7 @@ fn git_output(path: &Path, args: &[&str]) -> String {
 
 #[test]
 fn executes_completed_m1_features_with_cucumber_steps() {
+    let _runner = cucumber_runner_lock();
     let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features");
     futures::executor::block_on(async {
         RelensWorld::cucumber()
@@ -802,6 +815,7 @@ fn executes_completed_m1_features_with_cucumber_steps() {
 
 #[test]
 fn executes_completed_m3_lift_features_with_cucumber_steps() {
+    let _runner = cucumber_runner_lock();
     let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features");
     futures::executor::block_on(async {
         RelensWorld::cucumber()
@@ -823,6 +837,7 @@ fn executes_completed_m3_lift_features_with_cucumber_steps() {
 
 #[test]
 fn executes_completed_m4_lift_features_with_cucumber_steps() {
+    let _runner = cucumber_runner_lock();
     let features = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features");
     futures::executor::block_on(async {
         RelensWorld::cucumber()
@@ -842,6 +857,7 @@ fn executes_completed_m4_lift_features_with_cucumber_steps() {
 
 #[test]
 fn executes_json_update_feature_with_cucumber_steps() {
+    let _runner = cucumber_runner_lock();
     let feature = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features/update.feature");
     futures::executor::block_on(async {
         RelensWorld::cucumber()
@@ -854,6 +870,7 @@ fn executes_json_update_feature_with_cucumber_steps() {
 
 #[test]
 fn executes_m5_matrix_features_with_cucumber_steps() {
+    let _runner = cucumber_runner_lock();
     let feature = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features/matrix.feature");
     futures::executor::block_on(async { RelensWorld::cucumber().run_and_exit(feature).await });
 }
