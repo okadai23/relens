@@ -44,8 +44,8 @@
 - [x] **[DONE] TemplateSource と git adapter を実装する**
 - [x] **[DONE] pristine/base/project の 3-way merge を unit test する**
   - 記録済み commit とテンプレート HEAD を Git adapter で取得し、回答を再利用して双方を render する `relens update` を追加。
-  - 片側変更と非重複行変更を自動統合し、競合時は marker を書き込んで衝突ファイルを stdout に報告。
-  - engine unit test と `cargo test -p relens-cli --test features` の M2 受け入れシナリオで検証。
+  - base 座標の全 diff hunk を抽出し、複数の非連続・隣接変更、削除、同一点挿入、UTF-8 と EOF 改行を規定して自動統合する。バイナリの両側変更は保守的に競合とする。
+  - 複数 hunk の間への変更を統合する unit test、一部 hunk だけが重複する競合 test、および同一ファイルの結果全体を確認する cucumber E2E で検証。
 
 ## M3 — Auto lift と verify
 

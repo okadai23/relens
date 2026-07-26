@@ -993,7 +993,7 @@ default = false
         .stdout(predicates::str::contains("no-patch"));
 }
 
-/// Executable cucumber-step coverage for the four M2 update scenarios.
+/// Executable cucumber-step coverage for the core M2 update scenarios.
 #[test]
 fn m2_update_scenarios() {
     let root = tempfile::tempdir().unwrap();
@@ -1097,6 +1097,62 @@ fn m2_update_scenarios() {
         fs::read_to_string(conflicting.join("README.md"))
             .unwrap()
             .contains("<<<<<<< project")
+    );
+}
+
+/// Whole-file assertion for the multiple non-overlapping changes scenario in
+/// update.feature. This intentionally exercises two project hunks around one
+/// template hunk in the same rendered file.
+#[test]
+fn update_merges_multiple_non_overlapping_changes_in_one_file() {
+    let root = tempfile::tempdir().unwrap();
+    let template = root.path().join("multi-hunk-template");
+    fs::create_dir_all(&template).unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "Heading\nfirst\nmiddle\nlast\nFooter\n",
+    )
+    .unwrap();
+    git_commit(&template, "v1");
+
+    let project = root.path().join("project");
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args([
+            "new",
+            template.to_str().unwrap(),
+            "-d",
+            project.to_str().unwrap(),
+            "-a",
+            "name=unused",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        project.join("README.md"),
+        "Local heading\nfirst\nmiddle\nlast\nLocal footer\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "Heading\nfirst\nTemplate middle\nlast\nFooter\n",
+    )
+    .unwrap();
+    git_commit(&template, "v2");
+
+    CliCommand::cargo_bin("relens")
+        .unwrap()
+        .args(["update", project.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(project.join("README.md")).unwrap(),
+        "Local heading\nfirst\nTemplate middle\nlast\nLocal footer\n"
     );
 }
 
