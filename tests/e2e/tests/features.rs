@@ -277,6 +277,71 @@ fn generated_python_project(world: &mut RelensWorld) {
 }
 
 #[given(
+    regex = r#"^テンプレート \"python-lib\" v1 から回答 \"project_name=myapp\" で生成されたプロジェクトがある$"#
+)]
+fn generated_python_project_at_v1(world: &mut RelensWorld) {
+    let template = world.git_fixture("python-lib").to_path_buf();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.project_name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(template.join("README.md.j2"), "# {{ project_name }}\n").unwrap();
+    git_commit(&template, "v1");
+    generate(world, "project", &["project_name=myapp"]);
+}
+
+#[given(regex = r#"^テンプレート v2 が回答 \"project_name\" を \"package_name\" に移行する$"#)]
+fn template_v2_renames_project_name(world: &mut RelensWorld) {
+    let template = world.template_repository.as_ref().unwrap();
+    fs::create_dir(template.join("migrations")).unwrap();
+    fs::write(
+        template.join("migrations/001-package-name.json"),
+        r#"{"rename":{"project_name":"package_name"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        template.join("relens.toml"),
+        "[questions.package_name]\ntype='string'\n",
+    )
+    .unwrap();
+    fs::write(
+        template.join("README.md.j2"),
+        "# {{ package_name }}\nupdated\n",
+    )
+    .unwrap();
+    git_commit(template, "v2");
+}
+
+#[when(regex = r#"^プロジェクトで \"relens update\" を2回実行する$"#)]
+fn run_update_twice(world: &mut RelensWorld) {
+    let project = world.project_directory.clone().unwrap();
+    for _ in 0..2 {
+        world.run_cli(&["update", project.to_str().unwrap()]);
+        assert_eq!(world.last_cli.as_ref().unwrap().status, 0);
+    }
+}
+
+#[then("旧版は元の回答で描画される")]
+fn old_revision_uses_original_answers(world: &mut RelensWorld) {
+    world.assert_file("README.md", b"# myapp\nupdated\n");
+}
+
+#[then(regex = r#"^回答 \"package_name=myapp\" が保存される$"#)]
+fn migrated_answer_is_saved(world: &mut RelensWorld) {
+    let answers = fs::read_to_string(
+        world
+            .project_directory
+            .as_ref()
+            .unwrap()
+            .join(".relens/answers.toml"),
+    )
+    .unwrap();
+    assert!(answers.contains("package_name = \"myapp\""));
+    assert!(!answers.contains("project_name"));
+}
+
+#[given(
     regex = r#"^テンプレート \"python-lib\" と回答 \"(.+)\" から生成されたプロジェクトがある$"#
 )]
 fn generated_roundtrip_project(world: &mut RelensWorld, raw_answers: String) {
@@ -746,6 +811,18 @@ fn executes_completed_m4_lift_features_with_cucumber_steps() {
 fn executes_m5_matrix_features_with_cucumber_steps() {
     let feature = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features/matrix.feature");
     futures::executor::block_on(async { RelensWorld::cucumber().run_and_exit(feature).await });
+}
+
+#[test]
+fn executes_migration_update_feature_with_cucumber_steps() {
+    let feature = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../features/update.feature");
+    futures::executor::block_on(async {
+        RelensWorld::cucumber()
+            .filter_run_and_exit(feature, |_, _, scenario| {
+                scenario.name.contains("回答名の移行は一度だけ適用される")
+            })
+            .await;
+    });
 }
 
 #[derive(Debug)]
