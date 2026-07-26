@@ -158,6 +158,14 @@ pub fn export_lift(session: &LiftSession) -> Result<String, GitError> {
         };
         let target = repository.join(path);
         verify_export_path(repository, path)?;
+        if edit.deleted {
+            fs::remove_file(&target).map_err(|error| GitError::Command {
+                repository: repository.display().to_string(),
+                message: error.to_string(),
+            })?;
+            written.push(relative.as_str());
+            continue;
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| GitError::Command {
                 repository: repository.display().to_string(),
@@ -283,6 +291,7 @@ mod tests {
                 literal: "changed".into(),
                 substituted: None,
                 decision: ReviewDecision::Automatic,
+                deleted: false,
             }],
             divergences: vec![],
         };
@@ -364,6 +373,7 @@ mod tests {
                 literal: "new".into(),
                 substituted: None,
                 decision: ReviewDecision::Automatic,
+                deleted: false,
             }],
             divergences: vec![],
         };

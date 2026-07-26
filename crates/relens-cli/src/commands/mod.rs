@@ -429,13 +429,23 @@ fn lift(
     }
     let mut project_files = BTreeMap::new();
     for path in &changed {
-        if let Ok(bytes) = fs::read(project.join(path)) {
-            project_files.insert(path.clone(), bytes);
+        let project_path = project.join(path);
+        match fs::read(&project_path) {
+            Ok(bytes) => {
+                project_files.insert(path.clone(), Some(bytes));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                project_files.insert(path.clone(), None);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", project_path.display()));
+            }
         }
     }
     // Include pristine mapped files for consistent lookup and future multi-file verification.
     for (path, (bytes, _)) in rendered {
-        project_files.entry(path).or_insert(bytes);
+        project_files.entry(path).or_insert(Some(bytes));
     }
     let result = relens_lift::lift(&changed, &templates, &project_files, &answer_set.answers)
         .context("failed to lift drift")?;
@@ -484,6 +494,7 @@ fn lift(
                     literal,
                     substituted,
                     decision,
+                    deleted: file.deleted,
                 }
             })
             .collect(),
@@ -494,7 +505,11 @@ fn lift(
                 .map(|item| relens_domain::SessionDivergence {
                     path: item.path.clone(),
                     start: 0,
-                    end: item.expected.len().max(item.actual.len()),
+                    end: item
+                        .expected
+                        .as_ref()
+                        .map_or(0, Vec::len)
+                        .max(item.actual.as_ref().map_or(0, Vec::len)),
                 })
                 .collect(),
         },
@@ -515,6 +530,10 @@ fn lift(
     let mut reports = Vec::new();
     for file in &result.files {
         match (&file.classification, &file.template_path, &file.content) {
+            (relens_lift::Classification::Auto, Some(path), _) if file.deleted => {
+                patch.push_str(&format!("--- a/{path}\n+++ /dev/null\n@@ deleted @@\n"));
+                reports.push(format!("{}:Auto (deleted)", file.project_path));
+            }
             (relens_lift::Classification::Auto, Some(path), Some(content)) => {
                 patch.push_str(&format!(
                     "--- a/{path}\n+++ b/{path}\n@@ replacement @@\n{content}"
@@ -625,22 +644,30 @@ fn continue_lift(
         session.resolve(resolution.edit, decision)?;
     }
     let answers = relens_store::load_answers(project).context("failed to load answers")?;
-    let project_files = session
-        .edits
-        .iter()
-        .filter_map(|edit| {
-            fs::read(project.join(&edit.project_path))
-                .ok()
-                .map(|bytes| (edit.project_path.clone(), bytes))
-        })
-        .collect();
+    let mut project_files = BTreeMap::new();
+    for edit in &session.edits {
+        let path = project.join(&edit.project_path);
+        match fs::read(&path) {
+            Ok(bytes) => project_files.insert(edit.project_path.clone(), Some(bytes)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                project_files.insert(edit.project_path.clone(), None)
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+    }
     let divergences = relens_lift::verify_session(&session, &project_files, &answers.answers)
         .context("failed to verify reviewed lift")?
         .into_iter()
         .map(|item| relens_domain::SessionDivergence {
             path: item.path,
             start: 0,
-            end: item.expected.len().max(item.actual.len()),
+            end: item
+                .expected
+                .as_ref()
+                .map_or(0, Vec::len)
+                .max(item.actual.as_ref().map_or(0, Vec::len)),
         })
         .collect();
     session.verify(divergences)?;
@@ -658,6 +685,10 @@ fn write_session_patch(project: &Path, session: &relens_domain::LiftSession) -> 
         let Some(path) = &edit.template_path else {
             continue;
         };
+        if edit.deleted {
+            patch.push_str(&format!("--- a/{path}\n+++ /dev/null\n@@ deleted @@\n"));
+            continue;
+        }
         let content = if edit.decision == relens_domain::ReviewDecision::Substitute {
             edit.substituted.as_deref().unwrap_or(&edit.literal)
         } else {

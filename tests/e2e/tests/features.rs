@@ -371,6 +371,41 @@ fn add_private_notes(world: &mut RelensWorld) {
     fs::write(path, "private").unwrap();
 }
 
+#[given(regex = r#"^ユーザーが生成ファイル \"README.md\" を削除した$"#)]
+fn delete_generated_readme(world: &mut RelensWorld) {
+    fs::remove_file(world.project_directory.as_ref().unwrap().join("README.md")).unwrap();
+}
+
+#[then(regex = r#"^削除は \"Auto\" に分類されラウンドトリップ検証は \"Pass\" である$"#)]
+fn deletion_is_verified(world: &mut RelensWorld) {
+    let stdout = String::from_utf8_lossy(&world.last_cli.as_ref().unwrap().stdout);
+    assert!(stdout.contains("README.md:Auto (deleted)"));
+    assert!(stdout.contains("verification:Pass"));
+}
+
+#[then(regex = r#"^再レンダリング結果に \"README.md\" は存在しない$"#)]
+fn rerender_omits_deleted_file(world: &mut RelensWorld) {
+    let destination = world
+        .root
+        .as_ref()
+        .unwrap()
+        .path()
+        .join("rerendered-deletion");
+    let template = world.template_repository.clone().unwrap();
+    world.run_cli(&[
+        "new",
+        template.to_str().unwrap(),
+        "--destination",
+        destination.to_str().unwrap(),
+        "--answer",
+        "project_name=myapp",
+        "--answer",
+        "use_docker=false",
+    ]);
+    assert_eq!(world.last_cli.as_ref().unwrap().status, 0);
+    assert!(!destination.join("README.md").exists());
+}
+
 #[cfg(unix)]
 #[given("生成ファイルと TemplatePatch がプロジェクト外のファイルへのシンボリックリンクである")]
 fn replace_lift_paths_with_symlinks(world: &mut RelensWorld) {
@@ -756,6 +791,7 @@ fn executes_completed_m3_lift_features_with_cucumber_steps() {
                     || scenario.name.contains("変数由来")
                     || scenario.name.contains("Jinjaメタ文字")
                     || scenario.name.contains("追加された無関係")
+                    || scenario.name.contains("生成ファイルの削除")
                     || (cfg!(unix) && scenario.name.contains("シンボリックリンクを経由"))
             })
             .await;

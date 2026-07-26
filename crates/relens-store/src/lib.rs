@@ -305,7 +305,14 @@ mod tests {
             project: "app".into(),
             template: TemplateRef::new("repo", "abc").unwrap(),
             state: LiftSessionState::Verified,
-            edits: vec![],
+            edits: vec![relens_domain::SessionEdit {
+                project_path: "removed.txt".into(),
+                template_path: Some("removed.txt.j2".into()),
+                literal: String::new(),
+                substituted: None,
+                decision: relens_domain::ReviewDecision::Automatic,
+                deleted: true,
+            }],
             divergences: vec![],
         };
         save_session(d.path(), &session).unwrap();
