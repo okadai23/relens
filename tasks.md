@@ -35,6 +35,7 @@
   - `relens-domain`、`relens-engine`、`relens-store` と CLI の `new` / `drift` / `lift` を更新。
   - crate unit test と `cargo test -p relens-cli --test features` の M1 シナリオで検証。
   - Windows でもテンプレートパスと lock のキーを `/` 区切りへ正規化し、生成直後の誤検出を防止。
+  - 決定的なファイル走査は、エントリ取得と相対パス変換の失敗も対象パス付きで呼び出し元へ伝播し、部分的な drift や clean を返さない。
 
 ## M2 — update
 

@@ -77,16 +77,49 @@ fn answer_from_toml(v: toml::Value) -> Result<AnswerValue, RelensError> {
 }
 
 pub fn template_files(root: &Path) -> Result<Vec<PathBuf>, RelensError> {
-    let mut files = walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| e.file_name() != ".git")
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.path().strip_prefix(root).unwrap().to_owned())
-        .filter(|p| p != Path::new("relens.toml"))
-        .collect::<Vec<_>>();
+    let mut files = walked_files(
+        root,
+        walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| e.file_name() != ".git")
+            .map(|entry| entry.map_err(|error| walk_error(root, error))),
+    )?
+    .into_iter()
+    .filter(|p| p != Path::new("relens.toml"))
+    .collect::<Vec<_>>();
     files.sort();
     Ok(files)
+}
+
+fn walked_files<I>(root: &Path, entries: I) -> Result<Vec<PathBuf>, RelensError>
+where
+    I: IntoIterator<Item = Result<walkdir::DirEntry, RelensError>>,
+{
+    entries
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_type().is_file() => Some(relative_path(root, entry.path())),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn relative_path(root: &Path, path: &Path) -> Result<PathBuf, RelensError> {
+    path.strip_prefix(root)
+        .map(Path::to_owned)
+        .map_err(|source| RelensError::Io {
+            path: path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        })
+}
+
+fn walk_error(root: &Path, error: walkdir::Error) -> RelensError {
+    let path = error.path().unwrap_or(root).display().to_string();
+    let source = error
+        .into_io_error()
+        .unwrap_or_else(|| std::io::Error::other("filesystem traversal failed"));
+    RelensError::Io { path, source }
 }
 
 /// Converts a project-relative path to the platform-independent form used in
@@ -152,8 +185,9 @@ pub fn load_session(project: &Path, id: Option<&str>) -> Result<LiftSession, Rel
     } else {
         let mut paths = fs::read_dir(&directory)
             .io(&directory)?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
+            .map(|entry| entry.io(&directory).map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
             .collect::<Vec<_>>();
         paths.sort();
@@ -178,18 +212,14 @@ pub fn drift(project: &Path) -> Result<Vec<String>, RelensError> {
             _ => changed.push(relative.clone()),
         }
     }
-    for entry in walkdir::WalkDir::new(project)
-        .into_iter()
-        .filter_entry(|entry| entry.file_name() != ".relens")
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-    {
-        let relative = portable_path(
-            entry
-                .path()
-                .strip_prefix(project)
-                .expect("walked below project"),
-        );
+    for path in walked_files(
+        project,
+        walkdir::WalkDir::new(project)
+            .into_iter()
+            .filter_entry(|entry| entry.file_name() != ".relens")
+            .map(|entry| entry.map_err(|error| walk_error(project, error))),
+    )? {
+        let relative = portable_path(&path);
         if !locked_paths.contains(&relative) && !changed.contains(&relative) {
             changed.push(relative);
         }
@@ -280,5 +310,28 @@ mod tests {
         };
         save_session(d.path(), &session).unwrap();
         assert_eq!(load_session(d.path(), None).unwrap(), session);
+    }
+
+    #[test]
+    fn traversal_errors_are_not_treated_as_complete_results() {
+        let d = tempfile::tempdir().unwrap();
+        let inaccessible = d.path().join("inaccessible");
+        let error = RelensError::Io {
+            path: inaccessible.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected traversal failure",
+            ),
+        };
+
+        let result = walked_files(&inaccessible, [Err(error)]);
+
+        match result.unwrap_err() {
+            RelensError::Io { path, source } => {
+                assert_eq!(path, inaccessible.display().to_string());
+                assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            error => panic!("expected an I/O error, got {error}"),
+        }
     }
 }
