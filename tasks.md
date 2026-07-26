@@ -68,9 +68,13 @@
 - [x] **[DONE] `lift.feature`: 検証失敗パッチの export を禁止する**
 - [x] **[DONE] `lift.feature`: Verified session を git branch へ export する**
 - [x] **[DONE] LiftSession の状態遷移と永続化を unit test する**
+- [x] **[DONE] export 先のシンボリックリンク経由書き込みを拒否する**
   - 偶然一致の2候補、レビュー裁定、検証ゲートを domain/lift に実装。
   - `.relens/sessions` の JSON 永続化と Verified session の Git branch export を追加。
   - M4 の cucumber シナリオと状態遷移・永続化 unit test、workspace 品質ゲートで検証。
+  - export 前にリポジトリルートから対象までを `symlink_metadata` で検査し、canonicalize
+    した既存パスがルート配下にあることを確認。追跡済みファイルとリンクされた親の unit test、
+    export の cucumber シナリオで外部ファイルが変更されないことを検証。
 
 ## M5 — matrix と拡張
 
