@@ -100,6 +100,9 @@ pub struct SessionEdit {
     pub literal: String,
     pub substituted: Option<String>,
     pub decision: ReviewDecision,
+    /// Whether applying this edit removes the template (and therefore generated) file.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +528,7 @@ mod tests {
                 literal: "main".into(),
                 substituted: Some("{{ name }}".into()),
                 decision: ReviewDecision::Pending,
+                deleted: false,
             }],
             divergences: vec![],
         };

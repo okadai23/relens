@@ -23,6 +23,7 @@ pub struct LiftedFile {
     pub template_path: Option<String>,
     pub classification: Classification,
     pub content: Option<String>,
+    pub deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +41,12 @@ pub enum Verification {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Divergence {
     pub path: String,
-    pub expected: Vec<u8>,
-    pub actual: Vec<u8>,
+    pub expected: Option<Vec<u8>>,
+    pub actual: Option<Vec<u8>>,
 }
+
+/// A project snapshot where `None` means that a previously generated file was deleted.
+pub type ProjectTree = BTreeMap<String, Option<Vec<u8>>>;
 
 #[derive(Debug, Error)]
 pub enum LiftError {
@@ -59,7 +63,7 @@ pub enum LiftError {
 /// Renders every applicable decision in a reviewed session and compares it with the project.
 pub fn verify_session(
     session: &LiftSession,
-    project: &BTreeMap<String, Vec<u8>>,
+    project: &ProjectTree,
     answers: &BTreeMap<String, AnswerValue>,
 ) -> Result<Vec<Divergence>, LiftError> {
     let mut divergences = Vec::new();
@@ -75,13 +79,15 @@ pub fn verify_session(
         } else {
             &edit.literal
         };
-        let actual = relens_engine::render(content, answers)
+        let actual = (!edit.deleted)
+            .then(|| relens_engine::render(content, answers))
+            .transpose()
             .map_err(|source| LiftError::Render {
                 path: edit.project_path.clone(),
                 source,
             })?
-            .bytes;
-        let expected = project.get(&edit.project_path).cloned().unwrap_or_default();
+            .map(|rendered| rendered.bytes);
+        let expected = project.get(&edit.project_path).cloned().flatten();
         if actual != expected {
             divergences.push(Divergence {
                 path: edit.project_path.clone(),
@@ -100,7 +106,7 @@ pub fn verify_session(
 pub fn lift(
     changed: &BTreeSet<String>,
     templates: &BTreeMap<String, (String, String, SourceMap)>,
-    project: &BTreeMap<String, Vec<u8>>,
+    project: &ProjectTree,
     answers: &BTreeMap<String, AnswerValue>,
 ) -> Result<LiftResult, LiftError> {
     let mut files = Vec::new();
@@ -114,10 +120,21 @@ pub fn lift(
                     suggestion: "テンプレートへ新規ファイルとして追加する".into(),
                 },
                 content: None,
+                deleted: false,
             });
             continue;
         };
-        let bytes = project.get(path).cloned().unwrap_or_default();
+        let Some(bytes) = project.get(path).cloned().flatten() else {
+            patched.insert(path.clone(), None);
+            files.push(LiftedFile {
+                project_path: path.clone(),
+                template_path: Some(template_path.clone()),
+                classification: Classification::Auto,
+                content: None,
+                deleted: true,
+            });
+            continue;
+        };
         let rendered = String::from_utf8(bytes).map_err(|_| LiftError::NonUtf8(path.clone()))?;
         let pristine =
             relens_engine::render(template, answers).map_err(|source| LiftError::Render {
@@ -140,7 +157,7 @@ pub fn lift(
             })
         });
         if ambiguous.is_none() {
-            patched.insert(path.clone(), content.clone());
+            patched.insert(path.clone(), Some(content.clone()));
         }
         files.push(LiftedFile {
             project_path: path.clone(),
@@ -152,18 +169,22 @@ pub fn lift(
                 }
             }),
             content: Some(content),
+            deleted: false,
         });
     }
 
     let mut divergences = Vec::new();
     for (path, content) in patched {
-        let actual = relens_engine::render(&content, answers)
+        let actual = content
+            .as_deref()
+            .map(|content| relens_engine::render(content, answers))
+            .transpose()
             .map_err(|source| LiftError::Render {
                 path: path.clone(),
                 source,
             })?
-            .bytes;
-        let expected = project.get(&path).cloned().unwrap_or_default();
+            .map(|rendered| rendered.bytes);
+        let expected = project.get(&path).cloned().flatten();
         if actual != expected {
             divergences.push(Divergence {
                 path,
@@ -379,7 +400,7 @@ mod tests {
         let result = lift(
             &BTreeSet::from(["notes/private.md".into()]),
             &BTreeMap::new(),
-            &BTreeMap::from([("notes/private.md".into(), b"private".to_vec())]),
+            &BTreeMap::from([("notes/private.md".into(), Some(b"private".to_vec()))]),
             &BTreeMap::new(),
         )
         .unwrap();
@@ -387,6 +408,29 @@ mod tests {
             result.files[0].classification,
             Classification::Unmappable { .. }
         ));
+        assert_eq!(result.verification, Verification::Pass);
+    }
+
+    #[test]
+    fn put_get_preserves_a_generated_file_deletion() {
+        let pristine = relens_engine::render("generated\n", &BTreeMap::new()).unwrap();
+        let result = lift(
+            &BTreeSet::from(["generated.txt".into()]),
+            &BTreeMap::from([(
+                "generated.txt".into(),
+                (
+                    "generated.txt.j2".into(),
+                    "generated\n".into(),
+                    pristine.source_map,
+                ),
+            )]),
+            &BTreeMap::from([("generated.txt".into(), None)]),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert!(result.files[0].deleted);
+        assert_eq!(result.files[0].classification, Classification::Auto);
         assert_eq!(result.verification, Verification::Pass);
     }
 
@@ -400,7 +444,7 @@ mod tests {
                 "file".into(),
                 ("file.j2".into(), "header\n".into(), pristine.source_map),
             )]),
-            &BTreeMap::from([("file".into(), b"header\nrun main here\n".to_vec())]),
+            &BTreeMap::from([("file".into(), Some(b"header\nrun main here\n".to_vec()))]),
             &answers,
         )
         .unwrap();
@@ -423,11 +467,12 @@ mod tests {
                 literal: "run main here\n".into(),
                 substituted: Some("run {{ project_name }} here\n".into()),
                 decision: ReviewDecision::Substitute,
+                deleted: false,
             }],
             divergences: vec![],
         };
 
-        let matching = BTreeMap::from([("README.md".into(), b"run main here\n".to_vec())]);
+        let matching = BTreeMap::from([("README.md".into(), Some(b"run main here\n".to_vec()))]);
         assert!(
             verify_session(&session, &matching, &answers)
                 .unwrap()
@@ -443,10 +488,23 @@ mod tests {
         session.edits[0].decision = ReviewDecision::Substitute;
         let divergences = verify_session(&session, &matching, &changed_answers).unwrap();
         assert_eq!(divergences[0].path, "README.md");
-        assert_eq!(divergences[0].actual, b"run other here\n");
+        assert_eq!(divergences[0].actual, Some(b"run other here\n".to_vec()));
     }
 
     proptest! {
+        #[test]
+        fn put_get_for_generated_file_deletion(content in "[ A-Za-z0-9]{1,64}") {
+            let pristine = relens_engine::render(&content, &BTreeMap::new()).unwrap();
+            let result = lift(
+                &BTreeSet::from(["file".into()]),
+                &BTreeMap::from([("file".into(), ("file.j2".into(), content, pristine.source_map))]),
+                &BTreeMap::from([("file".into(), None)]),
+                &BTreeMap::new(),
+            ).unwrap();
+            prop_assert_eq!(result.verification, Verification::Pass);
+            prop_assert!(result.files[0].deleted);
+        }
+
         #[test]
         fn put_get_for_variable_adjacent_literal_edits(
             value in "[a-z]{1,12}", suffix in "[ A-Za-z0-9]{0,24}"
@@ -456,7 +514,7 @@ mod tests {
             let result = lift(
                 &BTreeSet::from(["file".into()]),
                 &BTreeMap::from([("file".into(), ("file.j2".into(), "{{ name }}".into(), expression_map("name", value.len())))]),
-                &BTreeMap::from([("file".into(), project_text.as_bytes().to_vec())]),
+                &BTreeMap::from([("file".into(), Some(project_text.as_bytes().to_vec()))]),
                 &answers,
             ).unwrap();
             prop_assert_eq!(result.verification, Verification::Pass);
@@ -467,7 +525,7 @@ mod tests {
             let result = lift(
                 &BTreeSet::new(),
                 &BTreeMap::new(),
-                &BTreeMap::from([("file".into(), value.into_bytes())]),
+                &BTreeMap::from([("file".into(), Some(value.into_bytes()))]),
                 &BTreeMap::new(),
             ).unwrap();
             prop_assert!(result.files.is_empty());

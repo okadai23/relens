@@ -107,6 +107,14 @@ pub fn export_lift(session: &LiftSession) -> Result<String, GitError> {
             &edit.literal
         };
         let target = repository.join(path);
+        if edit.deleted {
+            fs::remove_file(&target).map_err(|error| GitError::Command {
+                repository: repository.display().to_string(),
+                message: error.to_string(),
+            })?;
+            written.push(relative.as_str());
+            continue;
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| GitError::Command {
                 repository: repository.display().to_string(),
@@ -218,6 +226,7 @@ mod tests {
                 literal: "new".into(),
                 substituted: None,
                 decision: ReviewDecision::Automatic,
+                deleted: false,
             }],
             divergences: vec![],
         };

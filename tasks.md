@@ -53,6 +53,7 @@
 - [x] **[DONE] `lift.feature`: 変数由来値を逆置換する**
 - [x] **[DONE] `lift.feature`: Jinja メタ文字を raw block で保護する**
 - [x] **[DONE] `lift.feature`: 追加ファイルを Unmappable として扱う**
+- [x] **[DONE] `lift.feature`: 生成ファイルの削除ドリフトを持ち上げる**
 - [x] **[DONE] `roundtrip.feature`: PutGet のシナリオアウトライン**
 - [x] **[DONE] PutGet/GetPut の proptest generator と shrinking を実装する**
   - SourceMap の式由来を使う逆置換、Jinja raw 保護、追加ファイルの提案付き分類を `relens-lift` に実装。
@@ -60,6 +61,8 @@
   - M3 の cucumber シナリオと PutGet/GetPut property test、workspace 品質ゲートで検証。
   - `relens lift` が生成ファイル、メタデータ、セッション、TemplatePatch のシンボリックリンクを拒否し、
     セッション再開時の追加ファイルも含めてプロジェクト外を読み書きしないことを cucumber と unit test で検証。
+  - 欠落ファイルを空バイトと区別して削除 TemplatePatch として永続化し、PutGet unit/proptest、
+    `cargo test -p relens-lift --all-features --locked` と `cargo test -p relens-cli --test features --locked` で検証。
 
 ## M4 — review、session、export
 
