@@ -46,6 +46,7 @@
   - 記録済み commit とテンプレート HEAD を Git adapter で取得し、回答を再利用して双方を render する `relens update` を追加。
   - base 座標の全 diff hunk を抽出し、複数の非連続・隣接変更、削除、同一点挿入、UTF-8 と EOF 改行を規定して自動統合する。バイナリの両側変更は保守的に競合とする。
   - 複数 hunk の間への変更を統合する unit test、一部 hunk だけが重複する競合 test、および同一ファイルの結果全体を確認する cucumber E2E で検証。
+  - macOS の `/var` と `/private/var` の一時ディレクトリエイリアスを跨がないよう E2E fixture の root を正規化し、native CI のパス制約検査を安定化。
 
 ## M3 — Auto lift と verify
 

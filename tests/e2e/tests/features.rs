@@ -1106,7 +1106,11 @@ fn m2_update_scenarios() {
 #[test]
 fn update_merges_multiple_non_overlapping_changes_in_one_file() {
     let root = tempfile::tempdir().unwrap();
-    let template = root.path().join("multi-hunk-template");
+    // macOS exposes temporary directories through `/var`, while canonical paths
+    // use `/private/var`. Keep every path handed to relens in the same canonical
+    // namespace so its repository-confinement checks do not compare aliases.
+    let root_path = root.path().canonicalize().unwrap();
+    let template = root_path.join("multi-hunk-template");
     fs::create_dir_all(&template).unwrap();
     fs::write(
         template.join("relens.toml"),
@@ -1120,7 +1124,7 @@ fn update_merges_multiple_non_overlapping_changes_in_one_file() {
     .unwrap();
     git_commit(&template, "v1");
 
-    let project = root.path().join("project");
+    let project = root_path.join("project");
     CliCommand::cargo_bin("relens")
         .unwrap()
         .args([
