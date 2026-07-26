@@ -6,18 +6,20 @@ use tracing_subscriber::EnvFilter;
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose, cli.quiet);
-    let result = commands::execute(cli.command).inspect_err(|error| {
-        if let Some(conflict) = error.downcast_ref::<commands::UpdateConflict>() {
-            println!("conflicts: {}", conflict.files.join(","));
+    match commands::execute(cli.command) {
+        Ok(result) => {
+            if !cli.quiet {
+                println!("{}", output::render_success(&result, cli.output)?);
+            }
+            Ok(())
         }
-        if let Some(failure) = error.downcast_ref::<commands::ExportVerification>() {
-            println!("verification failed at {}", failure.locations);
+        Err(error) => {
+            if let Some(rendered) = output::render_known_failure(&error, cli.output)? {
+                println!("{rendered}");
+            }
+            Err(error)
         }
-    })?;
-    if !cli.quiet {
-        println!("{}", output::render(&result, cli.output)?);
     }
-    Ok(())
 }
 
 fn init_tracing(verbose: u8, quiet: bool) {
