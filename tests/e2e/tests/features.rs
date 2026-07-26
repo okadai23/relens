@@ -569,6 +569,39 @@ fn verified_session_exists(world: &mut RelensWorld) {
     run_lift(world);
 }
 
+#[cfg(unix)]
+#[given("検証済み LiftSession のエクスポート先が外部ファイルへの追跡済みシンボリックリンクである")]
+fn verified_export_targets_tracked_symlink(world: &mut RelensWorld) {
+    use std::os::unix::fs::symlink;
+
+    verified_session_exists(world);
+    let repository = world.template_repository.as_ref().unwrap();
+    let target = repository.join("README.md.j2");
+    let outside = world.root.as_ref().unwrap().path().join("outside");
+    fs::write(&outside, "outside must remain unchanged").unwrap();
+    fs::remove_file(&target).unwrap();
+    symlink(&outside, &target).unwrap();
+    git_commit(repository, "replace export target with symlink");
+    let revision = git_output(repository, &["rev-parse", "HEAD"]);
+
+    let sessions = world
+        .project_directory
+        .as_ref()
+        .unwrap()
+        .join(".relens/sessions");
+    let session_path = fs::read_dir(sessions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&session_path).unwrap()).unwrap();
+    json["template"]["revision"] = revision.trim().into();
+    fs::write(session_path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    world.outside_file = Some(outside);
+}
+
 #[when(regex = r#"^\"relens lift --export\" を実行する$"#)]
 fn export_lift(world: &mut RelensWorld) {
     let project = world.project_directory.clone().unwrap();
@@ -737,6 +770,7 @@ fn executes_completed_m4_lift_features_with_cucumber_steps() {
                     || scenario
                         .name
                         .contains("テンプレートリポジトリへエクスポート")
+                    || (cfg!(unix) && scenario.name.contains("エクスポート先の追跡済み"))
             })
             .await;
     });

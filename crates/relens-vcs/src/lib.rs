@@ -4,6 +4,7 @@ pub use relens_domain as domain;
 use relens_domain::{LiftSession, ReviewDecision, TemplateRef, TemplateSource, TemplateTree};
 use std::{
     fs,
+    io::ErrorKind,
     path::{Component, Path},
     process::Command,
 };
@@ -15,8 +16,57 @@ pub enum GitError {
     Command { repository: String, message: String },
     #[error("invalid UTF-8 path returned by git")]
     Path,
+    #[error("refusing to export through symbolic link: {path}")]
+    SymbolicLink { path: String },
+    #[error("export target escapes template repository: {path}")]
+    OutsideRepository { path: String },
     #[error(transparent)]
     Reference(#[from] relens_domain::RelensError),
+}
+
+/// Rejects existing symbolic links between `repository` and `relative`.
+///
+/// This is a best-effort preflight check. Callers requiring protection against
+/// concurrent filesystem mutation should additionally use platform-specific
+/// relative-open APIs (for example, `openat2` on Linux).
+fn verify_export_path(repository: &Path, relative: &Path) -> Result<(), GitError> {
+    let canonical_repository = fs::canonicalize(repository).map_err(|error| GitError::Command {
+        repository: repository.display().to_string(),
+        message: error.to_string(),
+    })?;
+    let mut candidate = repository.to_path_buf();
+    let mut last_existing = repository.to_path_buf();
+    for component in relative.components() {
+        candidate.push(component.as_os_str());
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(GitError::SymbolicLink {
+                        path: candidate.display().to_string(),
+                    });
+                }
+                last_existing = candidate.clone();
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(GitError::Command {
+                    repository: repository.display().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+    let canonical_existing =
+        fs::canonicalize(&last_existing).map_err(|error| GitError::Command {
+            repository: repository.display().to_string(),
+            message: error.to_string(),
+        })?;
+    if !canonical_existing.starts_with(&canonical_repository) {
+        return Err(GitError::OutsideRepository {
+            path: candidate.display().to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -107,6 +157,7 @@ pub fn export_lift(session: &LiftSession) -> Result<String, GitError> {
             &edit.literal
         };
         let target = repository.join(path);
+        verify_export_path(repository, path)?;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| GitError::Command {
                 repository: repository.display().to_string(),
@@ -174,6 +225,101 @@ mod tests {
     use super::*;
     use relens_domain::{LiftSessionState, SessionEdit};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[cfg(unix)]
+    fn symlink_export_session(
+        linked_parent: bool,
+    ) -> (std::path::PathBuf, std::path::PathBuf, LiftSession) {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "relens-vcs-symlink-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repository = root.join("repository");
+        let outside = root.join("outside");
+        fs::create_dir_all(&repository).unwrap();
+        let relative = if linked_parent {
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("template.txt"), "outside remains unchanged").unwrap();
+            symlink(&outside, repository.join("linked")).unwrap();
+            "linked/template.txt"
+        } else {
+            fs::write(&outside, "outside remains unchanged").unwrap();
+            symlink(&outside, repository.join("template.txt")).unwrap();
+            "template.txt"
+        };
+        GitTemplateSource::git(&repository, &["init"]).unwrap();
+        GitTemplateSource::git(&repository, &["add", "."]).unwrap();
+        GitTemplateSource::git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        )
+        .unwrap();
+        let revision =
+            String::from_utf8(GitTemplateSource::git(&repository, &["rev-parse", "HEAD"]).unwrap())
+                .unwrap()
+                .trim()
+                .to_string();
+        let session = LiftSession {
+            id: "session".into(),
+            project: "project".into(),
+            template: TemplateRef::new(repository.to_string_lossy(), revision).unwrap(),
+            state: LiftSessionState::Verified,
+            edits: vec![SessionEdit {
+                project_path: relative.into(),
+                template_path: Some(relative.into()),
+                literal: "changed".into(),
+                substituted: None,
+                decision: ReviewDecision::Automatic,
+            }],
+            divergences: vec![],
+        };
+        (root, outside, session)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_tracked_file_symlink_without_modifying_target() {
+        let (root, outside, session) = symlink_export_session(false);
+
+        assert!(matches!(
+            export_lift(&session),
+            Err(GitError::SymbolicLink { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(outside).unwrap(),
+            "outside remains unchanged"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_rejects_symlinked_parent_without_modifying_target() {
+        let (root, outside, session) = symlink_export_session(true);
+
+        assert!(matches!(
+            export_lift(&session),
+            Err(GitError::SymbolicLink { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(outside.join("template.txt")).unwrap(),
+            "outside remains unchanged"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn export_rejects_unrelated_worktree_changes() {
